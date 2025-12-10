@@ -9,6 +9,7 @@ import { GUARDIAN_PROFILE, HUNTER_PROFILE, UserRiskProfile } from '../models/typ
 import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
 import { AiAgentClient } from '../analysis/aiAgentClient';
+import { ChatHistoryRepository } from '../persistence/chatHistoryRepository';
 
 dotenv.config();
 
@@ -37,6 +38,9 @@ const agentService = new AgentService(
     riskEvaluator,
     GUARDIAN_PROFILE // Default
 );
+
+// Chat history repository (persist conversations)
+const chatRepo = new ChatHistoryRepository();
 
 // --- Routes ---
 
@@ -113,21 +117,79 @@ app.post('/chat', async (req, res) => {
         
         const agent = new EnhancedAiAgent();
         const walletService = new SmartWalletService(agent, agentService);
-        
+
+        // Persist user message immediately so history is available even if processing fails
+        try {
+            chatRepo.add({ role: 'user', content: message, timestamp: Date.now() });
+        } catch (dbErr) {
+            console.error('Failed to persist user chat message:', dbErr);
+            // continue — persistence failure shouldn't block the chat response
+        }
+
         // Set wallet from agent service if available
         const wallet = agentService.getWallet();
         if (wallet) {
             walletService.setWallet(wallet);
         }
-        
+
         const response = await walletService.processMessage(message);
-        
+
+        // Persist assistant response
+        try {
+            chatRepo.add({ role: 'assistant', content: response.content, timestamp: response.timestamp || Date.now(), actions: response.actions });
+        } catch (dbErr) {
+            console.error('Failed to persist assistant chat message:', dbErr);
+        }
+
         res.json({
             message: response.content,
             timestamp: response.timestamp,
             actions: response.actions
         });
     } catch (e: any) {
+        console.error('Chat processing error:', e);
+        // Persist error message in chat history so frontend can display it on reload
+        try {
+            chatRepo.add({ role: 'assistant', content: `Error: ${e.message || 'Internal error'}`, timestamp: Date.now() });
+        } catch (dbErr) {
+            console.error('Failed to persist chat error message:', dbErr);
+        }
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Chat history endpoints
+app.get('/chat/history', (req, res) => {
+    try {
+        const recent = chatRepo.getRecent(200);
+        res.json(recent);
+    } catch (e: any) {
+        console.error('Failed to fetch chat history:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/chat/history', (req, res) => {
+    const { role, content, timestamp, actions } = req.body;
+    if (!role || !content) {
+        res.status(400).json({ error: 'Missing role or content' });
+        return;
+    }
+    try {
+        chatRepo.add({ role, content, timestamp: timestamp || Date.now(), actions });
+        res.status(201).json({ ok: true });
+    } catch (e: any) {
+        console.error('Failed to save chat message:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/chat/history', (req, res) => {
+    try {
+        chatRepo.clear();
+        res.json({ ok: true });
+    } catch (e: any) {
+        console.error('Failed to clear chat history:', e);
         res.status(500).json({ error: e.message });
     }
 });
