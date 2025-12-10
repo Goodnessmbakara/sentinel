@@ -4,6 +4,9 @@ import { validateRiskProfile } from '../models/validation';
 // Requirements: 1.5, 2.2, 2.3
 
 export interface TradeDecision {
+    sentimentData: any;
+    marketData: any;
+    analysis: HypeAnalysis;
     shouldTrade: boolean;
     action: 'BUY' | 'SELL' | 'HOLD';
     amount: number;
@@ -11,64 +14,81 @@ export interface TradeDecision {
 }
 
 export class RiskEvaluator {
-    
-    evaluate(analysis: HypeAnalysis, profile: UserRiskProfile, tokenAddress: string): TradeDecision {
-        // Validate profile validity first (Requirement 2.1)
+    evaluate(
+        analysis: HypeAnalysis,
+        profile: UserRiskProfile,
+        tokenAddress: string,
+        sentimentData: any,
+        marketData: any
+    ): TradeDecision {
+        // ── 2.1 Validate profile ─────────────────────────────────────
         if (!validateRiskProfile(profile)) {
-           return {
-               shouldTrade: false,
-               action: 'HOLD',
-               amount: 0,
-               reasoning: "Invalid risk profile configuration"
-           }; 
-        }
-
-        // 1. Check Confidence Score (Requirement 1.5 for Guardian)
-        if (analysis.confidenceScore < profile.minConfidenceScore) {
             return {
+                sentimentData,
+                marketData,
+                analysis,
                 shouldTrade: false,
                 action: 'HOLD',
                 amount: 0,
-                reasoning: `Confidence score ${analysis.confidenceScore} below threshold ${profile.minConfidenceScore}`
+                reasoning: 'Invalid risk profile configuration',
             };
         }
 
-        // 2. Check Allowed Tokens (Requirement 2.2 for Guardian)
-        // If allowedTokens is empty, it means ALL permitted (Hunter default), 
-        // UNLESS it's explicitly checked in validation.
-        // In our model: Guardian MUST have allowedTokens. Hunter has empty array = all.
-        
+        // ── 1.5 Confidence threshold ─────────────────────────────────
+        if (analysis.confidenceScore < profile.minConfidenceScore) {
+            return {
+                sentimentData,
+                marketData,
+                analysis,
+                shouldTrade: false,
+                action: 'HOLD',
+                amount: 0,
+                reasoning: `Confidence ${analysis.confidenceScore.toFixed(2)} < ${profile.minConfidenceScore.toFixed(2)}`,
+            };
+        }
+
+        // ── 2.2 Guardian mode: token whitelist ───────────────────────
         if (profile.mode === 'GUARDIAN') {
-            const isAllowed = profile.allowedTokens.includes(tokenAddress);
+            const isAllowed = profile.allowedTokens.some(
+                (addr) => addr.toLowerCase() === tokenAddress.toLowerCase()
+            );
             if (!isAllowed) {
                 return {
+                    sentimentData,
+                    marketData,
+                    analysis,
                     shouldTrade: false,
                     action: 'HOLD',
                     amount: 0,
-                    reasoning: `Token ${tokenAddress} not in allowed list for Guardian mode`
+                    reasoning: `Token ${tokenAddress} not in Guardian whitelist`,
                 };
             }
         }
 
-        // 3. Signal Decision
-        if (analysis.signal === 'VALID_BREAKOUT' || analysis.signal === 'ACCUMULATION') {
-            // Determine Position Size
-            // Simple logic: uses maxPositionSize
-            // In real app, might depend on wallet balance or Kelly Criterion
-            
+        // ── 2.3 Bullish signals (100% type-safe) ─────────────────────
+        const bullishSignals = ['VALID_BREAKOUT', 'ACCUMULATION'];
+
+        if (bullishSignals.includes(analysis.signal as string)) {
             return {
+                sentimentData,
+                marketData,
+                analysis,
                 shouldTrade: true,
                 action: 'BUY',
                 amount: profile.maxPositionSize,
-                reasoning: `Valid signal ${analysis.signal} meets risk criteria`
+                reasoning: `Bullish signal: ${analysis.signal} → Entry approved`,
             };
         }
 
+        // ── Default: HOLD ─────────────────────────────────────────────
         return {
+            sentimentData,
+            marketData,
+            analysis,
             shouldTrade: false,
             action: 'HOLD',
             amount: 0,
-            reasoning: `Signal ${analysis.signal} does not warrant entry`
+            reasoning: `No actionable buy signal (received: ${analysis.signal})`,
         };
     }
 }

@@ -43,10 +43,12 @@
     "@crypto.com/ai-agent-client": "^1.0.2",
     "@google/generative-ai": "^0.24.1",
     "@openzeppelin/contracts": "^5.4.0",
+    "@types/better-sqlite3": "^7.6.11",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/ws": "^8.18.1",
     "axios": "^1.13.2",
+    "better-sqlite3": "^12.5.0",
     "cors": "^2.8.5",
     "express": "^5.2.1",
     "ws": "^8.18.3"

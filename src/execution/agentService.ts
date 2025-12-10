@@ -113,7 +113,7 @@ export class AgentService {
             const analysis = await this.hypeFilter.analyze(marketData, sentimentData);
 
             // 3. Risk Eval
-            const decision = this.riskEvaluator.evaluate(analysis, this.riskProfile, tokenAddress);
+            const decision = this.riskEvaluator.evaluate(analysis, this.riskProfile, tokenAddress, sentimentData, marketData);
 
             // 4. Implement X402 (Log or Header)
             const header = X402Handler.getHeader("sentinel-agent", "gemini-pro", 1);
