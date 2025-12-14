@@ -11,7 +11,7 @@ export interface ChatResponse {
 }
 
 export interface BlockchainAction {
-    type: 'balance_query' | 'token_swap' | 'market_analysis' | 'position_query' | 'trade_confirmation_required' | 'trade_executed';
+    type: 'balance_query' | 'balance_update' | 'token_swap' | 'market_analysis' | 'position_query' | 'trade_confirmation_required' | 'trade_executed' | 'transfer';
     details: any;
 }
 
@@ -37,6 +37,15 @@ export class EnhancedAiAgent {
     private conversationContext: any[] = [];
     private useRealAgent: boolean = false;
     private chatSession: any | null = null;
+    private forceReal: boolean = (process.env.LLM_FORCE_REAL === '1' || process.env.LLM_FORCE_REAL === 'true');
+    // LLM request queue + rate-limiting
+    private llmQueue: Array<{
+        message: string;
+        resolve: (r: any) => void;
+        reject: (e: any) => void;
+    }> = [];
+    private processingQueue: boolean = false;
+    private minIntervalMs: number = Number(process.env.LLM_MIN_INTERVAL_MS || 2000); // throttle interval (ms)
 
     constructor() {
         const apiKey = process.env.LLM_API_KEY?.trim();
@@ -49,23 +58,33 @@ export class EnhancedAiAgent {
         if (apiKey) {
             try {
                 this.genAI = new GoogleGenerativeAI(apiKey);
-                // Use gemini-2.5-flash (verified available via list-models script)
+                // Use gemini-2.0-flash (stable and widely available)
                 this.model = this.genAI.getGenerativeModel({ 
-                    model: 'gemini-2.5-flash',
+                    model: 'gemini-2.0-flash',
                     generationConfig: {
-                        temperature: 0.7,
-                        topP: 0.95,
+                        temperature: 0.3,
+                        topP: 0.9,
                         maxOutputTokens: 8192,
                     }
                 });
                 
-                // Initialize chat session for conversation memory
+                // Initialize chat session for conversation memory with system context
                 this.chatSession = this.model.startChat({
-                    history: []
+                    history: [
+                        {
+                            role: 'user',
+                            parts: [{ text: 'You are a Bloomberg-style professional cryptocurrency trading assistant for the Cronos network. Provide concise, factual, and data-driven answers suitable for a trading desk audience. Prioritize structured output where possible (JSON for data, short markdown for human explanation). Responsibilities: 1) Report wallet balances and token holdings, 2) Analyze market sentiment and provide clear BUY/SELL/HOLD recommendations with confidence and reasoning, 3) Parse and validate trade instructions and outline any required confirmations, 4) When executing swaps, provide transaction metadata and post-trade balances. Be precise, avoid speculation, and include numeric scores and short reasoning.' }],
+                        },
+                        {
+                            role: 'model',
+                            parts: [{ text: 'Understood. I am your Cronos trading assistant. I can help you check balances, analyze markets, and execute trades on the Cronos network. How can I assist you today?' }],
+                        }
+                    ]
                 });
                 
                 this.useRealAgent = true;
-                console.log('✓ Enhanced AI Agent initialized with Gemini 2.5 Flash');
+                console.log('✓ Enhanced AI Agent initialized with Gemini 2.0 Flash');
+                console.log(`LLM throttle interval: ${this.minIntervalMs}ms`);
             } catch (error: any) {
                 console.error('❌ Failed to initialize Gemini:', error.message);
                 this.useRealAgent = false;
@@ -84,24 +103,78 @@ export class EnhancedAiAgent {
             return this.mockChat(message);
         }
 
-        try {
-            const result = await this.chatSession.sendMessage(message);
-            const response = await result.response;
-            const text = response.text();
+        // Enqueue the request so we can throttle and retry
+        return new Promise<ChatResponse>((resolve, reject) => {
+            this.llmQueue.push({ message, resolve, reject });
+            if (!this.processingQueue) this.processQueue();
+        });
+    }
 
-            return {
-                message: text,
-                status: 'Success',
-                actions: this.extractBlockchainActions({ message: text })
-            };
+    // Process queued LLM requests sequentially with retry/backoff
+    private async processQueue() {
+        this.processingQueue = true;
+        while (this.llmQueue.length > 0) {
+            const item = this.llmQueue.shift();
+            if (!item) break;
 
-        } catch (error: any) {
-            console.error('Gemini chat error:', error);
-            return {
-                message: `Error: ${error.message || 'Failed to get response'}`,
-                status: 'Error'
-            };
+            const { message, resolve, reject } = item;
+
+            // Ensure minimum interval between calls
+            await this.delay(this.minIntervalMs);
+
+            try {
+                const responseText = await this.callWithRetry(message, 3);
+                const resp: ChatResponse = {
+                    message: responseText,
+                    status: 'Success',
+                    actions: this.extractBlockchainActions({ message: responseText })
+                };
+                resolve(resp);
+            } catch (err: any) {
+                // Inspect error to provide a clearer message for quota/rate-limit problems
+                const errMsg = (err && (err.message || String(err))) || 'Unknown error';
+                const isQuota = /quota|rate[- ]?limit|429|Too Many Requests/i.test(errMsg);
+                if (isQuota) {
+                    const friendly = `LLM quota exceeded or rate-limited. Check your Google Cloud billing/quotas: https://ai.google.dev/gemini-api/docs/rate-limits. Consider increasing \`LLM_MIN_INTERVAL_MS\` to reduce calls or obtain a paid quota.`;
+                    const resp: ChatResponse = {
+                        message: `Error: ${friendly}`,
+                        status: 'Error'
+                    };
+                    resolve(resp);
+                } else {
+                    // Unknown error: propagate so caller can decide
+                    reject(err);
+                }
+            }
         }
+        this.processingQueue = false;
+    }
+
+    // Low-level call with exponential backoff for transient errors
+    private async callWithRetry(message: string, attempts: number): Promise<string> {
+        let delayMs = 500;
+        for (let i = 0; i < attempts; i++) {
+            try {
+                const result = await this.chatSession!.sendMessage(message);
+                const response = await result.response;
+                const text = response.text();
+                return text;
+            } catch (error: any) {
+                const errMsg = (error && (error.message || error.toString && error.toString())) || '';
+                const isQuota = /quota|rate[- ]?limit|429|Too Many Requests/i.test(errMsg);
+                // For quota/rate-limit errors, perform longer backoff and retry up to attempts
+                if (i === attempts - 1) throw error;
+                // increase wait for quota errors
+                const extra = isQuota ? delayMs * 4 : 0;
+                await this.delay(delayMs + extra + Math.random() * 200);
+                delayMs *= 2;
+            }
+        }
+        throw new Error('callWithRetry exhausted');
+    }
+
+    private delay(ms: number) {
+        return new Promise((r) => setTimeout(r, ms));
     }
 
     /**
@@ -149,24 +222,67 @@ export class EnhancedAiAgent {
      * e.g., "Buy 10 CRO worth of USDC"
      */
     async executeTradeCommand(command: string): Promise<TradeCommand | null> {
-        const query = `Parse this trade command: "${command}". Extract: action (BUY/SELL), tokenIn, tokenOut, amount. Return as JSON with format: {"action": "BUY", "tokenIn": "CRO", "tokenOut": "USDC", "amount": 10}`;
-        
+        // First try a local, rule-based parser for common command forms.
+        const localParse = (text: string): TradeCommand | null => {
+            const t = text.trim();
+
+            // Buy X TOKEN [worth of|of|for] QUOTE  -> buy TOKEN using QUOTE, amount = X (units of TOKEN)
+            const buyRe = /^(?:buy)\s+(\d+(?:\.\d+)?)\s+(\w+)(?:\s+(?:worth of|of|for)\s+(\w+))?/i;
+            const sellRe = /^(?:sell)\s+(\d+(?:\.\d+)?)\s+(\w+)(?:\s+(?:for|to)\s+(\w+))?/i;
+            const swapRe = /^(?:swap)\s+(\d+(?:\.\d+)?)\s+(\w+)\s+(?:for|to)\s+(\w+)/i;
+
+            let m = t.match(buyRe);
+            if (m) {
+                const amount = parseFloat(m[1]);
+                const out = m[2].toUpperCase();
+                const quote = m[3] ? m[3].toUpperCase() : (process.env.DEFAULT_QUOTE_TOKEN || 'USDC');
+                return { action: 'BUY', tokenIn: quote, tokenOut: out, amount, requiresConfirmation: (amount * 0.12) > 50 };
+            }
+
+            m = t.match(sellRe);
+            if (m) {
+                const amount = parseFloat(m[1]);
+                const inTok = m[2].toUpperCase();
+                const out = m[3] ? m[3].toUpperCase() : (process.env.DEFAULT_QUOTE_TOKEN || 'USDC');
+                return { action: 'SELL', tokenIn: inTok, tokenOut: out, amount, requiresConfirmation: (amount * 0.12) > 50 };
+            }
+
+            m = t.match(swapRe);
+            if (m) {
+                const amount = parseFloat(m[1]);
+                const inTok = m[2].toUpperCase();
+                const out = m[3].toUpperCase();
+                return { action: 'SELL', tokenIn: inTok, tokenOut: out, amount, requiresConfirmation: (amount * 0.12) > 50 };
+            }
+
+            return null;
+        };
+
+        // Try parsing the raw user command first.
+        const parsedLocal = localParse(command);
+        if (parsedLocal) return parsedLocal;
+
+        // Fallback to asking the AI to parse if local parse fails.
+        const query = `Parse this trade command: "${command}". Extract: action (BUY/SELL), tokenIn, tokenOut, amount. Return as JSON with format: {\"action\": \"BUY\", \"tokenIn\": \"CRO\", \"tokenOut\": \"USDC\", \"amount\": 10}`;
         const response = await this.chat(query);
 
         if (response.status === 'Success') {
+            // Try to parse JSON from the AI first
             try {
                 const parsed = JSON.parse(response.message);
-                const valueEstimate = parsed.amount * 0.12; // Rough CRO price estimate
-                
+                const valueEstimate = (parsed.amount || 0) * 0.12; // Rough CRO price estimate
                 return {
                     action: parsed.action,
                     tokenIn: parsed.tokenIn,
                     tokenOut: parsed.tokenOut,
                     amount: parsed.amount,
-                    requiresConfirmation: valueEstimate > 50 // $50 threshold
+                    requiresConfirmation: valueEstimate > 50
                 };
             } catch (e) {
-                console.error('Failed to parse trade command:', e);
+                // If AI didn't return JSON, attempt to parse the original command or the AI text
+                const tryAlt = localParse(response.message) || localParse(command);
+                if (tryAlt) return tryAlt;
+                console.error('Failed to parse trade command from AI response:', e);
                 return null;
             }
         }

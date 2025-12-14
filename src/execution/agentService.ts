@@ -5,6 +5,9 @@ import { RiskEvaluator, TradeDecision } from '../analysis/riskEvaluator';
 import { MarketData, SentimentData, UserRiskProfile, TradeSignal } from '../models/types';
 import { ethers, Contract } from 'ethers';
 import { X402Handler } from './x402Handler';
+import { ethers as EthersNamespace } from 'ethers';
+import { logger } from '../utils/logger';
+import { metrics } from '../utils/metrics';
 
 // Requirements: 6.1, 6.2
 
@@ -19,7 +22,7 @@ export class AgentService {
     private signer: ethers.Wallet | null = null;
 
     private isRunning: boolean = false;
-    private loopInterval: number = 30000; // 30s
+    private loopInterval: number = 300000; // 5min (reduced to lower LLM usage)
     private loopTimer: NodeJS.Timeout | null = null;
     
     // config
@@ -63,31 +66,33 @@ export class AgentService {
                 "function closePosition(uint256 positionId, uint256 minAmountOut) external"
             ];
             this.agentContract = new ethers.Contract(contractAddress, abi, signer);
-            console.log(`✓ Agent Contract connected: ${contractAddress}`);
+            logger.info('Agent Contract connected', { contractAddress });
         } else {
-            console.log('⚠ Running in ANALYSIS-ONLY mode (no contract deployed yet)');
+            logger.warn('Running in ANALYSIS-ONLY mode (no contract deployed yet)');
             this.agentContract = null;
         }
         
         this.isRunning = true;
-        console.log("✓ Agent Service Started");
+        logger.info('Agent Service Started');
         this.runLoop();
     }
 
     public stop() {
         this.isRunning = false;
         if (this.loopTimer) clearTimeout(this.loopTimer);
-        console.log("Agent Service Stopped");
+        logger.info('Agent Service Stopped');
     }
 
     private async runLoop() {
         if (!this.isRunning) return;
 
         try {
-            console.log("Creating Trading Loop Iteration...");
+            metrics.inc('loop.iterations');
+            logger.info('Creating Trading Loop Iteration');
             await this.processTokens();
         } catch (error) {
-            console.error("Error in trading loop:", error);
+            metrics.inc('errors');
+            logger.error('Error in trading loop', { error });
         }
 
         this.loopTimer = setTimeout(() => this.runLoop(), this.loopInterval);
@@ -98,13 +103,16 @@ export class AgentService {
         // For Hackathon/Demo, let's hardcode a few or fetch "top gainers" from MCP if implemented.
         const tokensToScan = ["0xTokenA", "0xTokenB"]; 
         
+        metrics.inc('tokens.scanned', tokensToScan.length);
         for (const token of tokensToScan) {
             await this.analyzeAndTrade(token);
         }
     }
 
     public async analyzeAndTrade(tokenAddress: string): Promise<TradeDecision | null> {
+        const start = Date.now();
         try {
+            metrics.inc('analyze.calls');
             // 1. Ingest Data
             const marketData = await this.mcpClient.getMarketData(tokenAddress);
             const sentimentData = await this.sentimentService.getSentimentData("TOKEN_SYMBOL"); // Need symbol
@@ -117,19 +125,65 @@ export class AgentService {
 
             // 4. Implement X402 (Log or Header)
             const header = X402Handler.getHeader("sentinel-agent", "gemini-pro", 1);
-            console.log("X402 Header:", header);
+            logger.debug('X402 Header', { header });
 
             // 5. Execute
             if (decision.shouldTrade && this.agentContract) {
-                console.log(`Executing Trade: ${decision.action} ${tokenAddress}`);
+                metrics.inc('trade.executions');
+                logger.info('Executing Trade via agentContract', { action: decision.action, token: tokenAddress });
                 // await this.agentContract.openPosition(...);
-                // Implementation pending specific Router logic details
+            } else if (decision.shouldTrade && this.signer) {
+                // Fallback: attempt an on-chain swap via configured router (if set)
+                metrics.inc('trade.fallbacks');
+                const routerAddress = process.env.ROUTER_ADDRESS;
+                if (routerAddress) {
+                    try {
+                        metrics.inc('trade.fallback.swap_attempts');
+                        logger.info('Attempting on-chain swap via router', { routerAddress });
+                        const ERC20_ABI = [
+                            'function approve(address spender, uint256 amount) external returns (bool)',
+                            'function allowance(address owner, address spender) external view returns (uint256)',
+                            'function decimals() view returns (uint8)'
+                        ];
+                        const ROUTER_ABI = [
+                            'function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) external returns (uint256[])'
+                        ];
+
+                        const tokenIn = tokenAddress;
+                        const tokenOut = process.env.DEFAULT_QUOTE_TOKEN || '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59';
+                        const tokenContract = new EthersNamespace.Contract(tokenIn, ERC20_ABI, this.signer as any);
+                        let decimals = 18;
+                        try { decimals = Number(await tokenContract.decimals()); } catch (_) { decimals = 18; }
+
+                        const amountIn = EthersNamespace.parseUnits('0.1', decimals);
+
+                        const owner = await this.signer.getAddress();
+                        const allowance: bigint = await tokenContract.allowance(owner, routerAddress);
+                        if (allowance < amountIn) {
+                            const tx = await tokenContract.approve(routerAddress, amountIn);
+                            await tx.wait?.();
+                        }
+
+                        const router = new EthersNamespace.Contract(routerAddress, ROUTER_ABI, this.signer as any);
+                        const path = [tokenIn, tokenOut];
+                        const deadline = Math.floor(Date.now() / 1000) + 60 * 5;
+                        const minOut = 0;
+                        const swapTx = await router.swapExactTokensForTokens(amountIn, minOut, path, owner, deadline);
+                        await swapTx.wait?.();
+                        logger.info('Fallback on-chain swap attempted');
+                    } catch (swapErr) {
+                        metrics.inc('errors');
+                        logger.error('Fallback swap failed', { swapErr });
+                    }
+                }
             }
 
+            metrics.timing('analyze.latency_ms', Date.now() - start);
             return decision;
 
         } catch (e) {
-            console.error(`Failed to process token ${tokenAddress}`, e);
+            metrics.inc('errors');
+            logger.error(`Failed to process token ${tokenAddress}`, { error: e });
             return null;
         }
     }

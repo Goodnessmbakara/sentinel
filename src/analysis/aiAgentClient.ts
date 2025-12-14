@@ -25,13 +25,13 @@ export class AiAgentClient {
             try {
                 this.genAI = new GoogleGenerativeAI(apiKey);
                 this.model = this.genAI.getGenerativeModel({ 
-                    model: 'gemini-2.5-flash',
+                    model: 'gemini-2.0-flash',
                     generationConfig: {
                         temperature: 0.7,
                         maxOutputTokens: 1024,
                     }
                 });
-                console.log('✓ AI Agent Client initialized with Gemini 2.5 Flash');
+                console.log('✓ AI Agent Client initialized with Gemini 2.0 Flash');
             } catch (error: any) {
                 console.error('❌ Failed to initialize Gemini for Hype Filter:', error.message);
                 this.useMock = true;

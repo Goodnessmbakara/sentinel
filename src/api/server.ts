@@ -10,6 +10,8 @@ import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
 import { AiAgentClient } from '../analysis/aiAgentClient';
 import { ChatHistoryRepository } from '../persistence/chatHistoryRepository';
+import { logger } from '../utils/logger';
+import { metrics } from '../utils/metrics';
 
 dotenv.config();
 
@@ -53,6 +55,21 @@ app.get('/status', (req, res) => {
         status: 'OK',
         timestamp: Date.now()
     });
+});
+
+app.get('/health', (req, res) => {
+    try {
+        const health = {
+            status: 'ok',
+            agentRunning: agentService.isAgentRunning(),
+            metrics: metrics.snapshot(),
+            timestamp: Date.now()
+        };
+        res.json(health);
+    } catch (e: any) {
+        logger.error('Health check failed', { error: e });
+        res.status(500).json({ status: 'error' });
+    }
 });
 
 app.post('/start', async (req, res) => {
@@ -196,5 +213,5 @@ app.delete('/chat/history', (req, res) => {
 
 const PORT = 3001;
 app.listen(PORT, () => {
-    console.log(`Sentinel API running on port ${PORT}`);
+    logger.info('Sentinel API running', { port: PORT });
 });
