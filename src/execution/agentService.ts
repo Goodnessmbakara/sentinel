@@ -22,6 +22,7 @@ export class AgentService {
     private signer: ethers.Wallet | null = null;
 
     private isRunning: boolean = false;
+    private isReadyFlag: boolean = false;
     private loopInterval: number = 300000; // 5min (reduced to lower LLM usage)
     private loopTimer: NodeJS.Timeout | null = null;
     
@@ -51,6 +52,10 @@ export class AgentService {
         return this.isRunning;
     }
 
+    public isReady(): boolean {
+        return this.isReadyFlag;
+    }
+
     public updateRiskProfile(profile: UserRiskProfile) {
         this.riskProfile = profile;
     }
@@ -74,6 +79,8 @@ export class AgentService {
         
         this.isRunning = true;
         logger.info('Agent Service Started');
+
+        // Start loop promptly; dependency probe now falls back to mock data when MCP is unavailable.
         this.runLoop();
     }
 
@@ -89,6 +96,16 @@ export class AgentService {
         try {
             metrics.inc('loop.iterations');
             logger.info('Creating Trading Loop Iteration');
+
+            // Probe dependencies (MCP) before scanning tokens. If probe fails and mock fallback is disabled, skip.
+            const probeOk = await this.probeDependencies();
+            this.isReadyFlag = probeOk;
+            if (!probeOk) {
+                logger.warn('Dependency probe failed — skipping token scan this iteration');
+                this.loopTimer = setTimeout(() => this.runLoop(), this.loopInterval);
+                return;
+            }
+
             await this.processTokens();
         } catch (error) {
             metrics.inc('errors');
@@ -96,6 +113,20 @@ export class AgentService {
         }
 
         this.loopTimer = setTimeout(() => this.runLoop(), this.loopInterval);
+    }
+
+    // Attempt lightweight probes to ensure downstream dependencies are reachable.
+    private async probeDependencies(): Promise<boolean> {
+        try {
+            // Try fetching market data for a token; if MCP is unreachable this will throw and be caught.
+            const probeToken = process.env.PROBE_TOKEN || "0xTokenA";
+            await this.mcpClient.getMarketData(probeToken);
+            return true;
+        } catch (e) {
+            // If MCP_ALLOW_MOCK is enabled (default), McpClient will already fall back to mock and not throw.
+            // If still failing here, report not ready.
+            return false;
+        }
     }
 
     private async processTokens() {
@@ -181,10 +212,19 @@ export class AgentService {
             metrics.timing('analyze.latency_ms', Date.now() - start);
             return decision;
 
-        } catch (e) {
+        } catch (e: any) {
             metrics.inc('errors');
             logger.error(`Failed to process token ${tokenAddress}`, { error: e });
-            return null;
+            // Return a TradeDecision-shaped object with error reasoning so callers (UI) can show failure details
+            return {
+                sentimentData: null as any,
+                marketData: null as any,
+                analysis: {} as any,
+                shouldTrade: false,
+                action: 'HOLD',
+                amount: 0,
+                reasoning: `Execution failed: ${e?.message || String(e)}`,
+            } as unknown as TradeDecision;
         }
     }
 }

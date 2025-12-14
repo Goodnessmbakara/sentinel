@@ -46,32 +46,83 @@ export class SmartWalletService {
      * Helper to fetch current wallet balances (native and token balances for provided symbols)
      */
     private async getWalletBalances(symbols: string[] = []): Promise<{ native: string; tokens: Record<string, string> }> {
-        if (!this.wallet) throw new Error('Wallet not set');
+        if (!this.wallet) {
+            throw new Error('Wallet not set. Please start the agent first via /start endpoint.');
+        }
         const provider = this.wallet.provider;
-        if (!provider) throw new Error('Wallet has no provider');
+        if (!provider) {
+            throw new Error('Wallet has no provider. Please ensure the wallet is initialized with a provider.');
+        }
         const address = await this.wallet.getAddress();
-        const nativeBig = await provider.getBalance(address);
-        const native = ethers.formatEther(nativeBig as any);
+        console.log(`Fetching balances for address: ${address}, symbols: ${symbols.join(', ')}`);
+        
+        // Force fresh balance by explicitly requesting latest block
+        let native = '0.000000';
+        try {
+            const nativeBig = await provider.getBalance(address, 'latest');
+            const nativeFormatted = ethers.formatEther(nativeBig as any);
+            const nativeNum = Number(nativeFormatted);
+            native = Number.isFinite(nativeNum) ? nativeNum.toFixed(6) : '0.000000';
+            console.log(`Native balance (CRO): ${native}`);
+        } catch (e: any) {
+            console.error('Failed to fetch native balance:', e.message || e);
+            throw new Error(`Failed to fetch native balance: ${e.message || e}`);
+        }
+        
         const tokens: Record<string, string> = {};
         for (const s of symbols) {
-            // Skip native CRO as it's returned in `native`
-            if (s.toUpperCase() === 'CRO') {
+            const symbolUpper = s.toUpperCase();
+            // Handle native CRO - add it to tokens for UI consistency
+            if (symbolUpper === 'CRO') {
+                tokens[s] = native; // Use native balance for CRO
+                console.log(`CRO balance (from native): ${native}`);
                 continue;
             }
+            
+            // Fetch ERC20 token balance
             try {
-                const addr = this.getTokenAddress(s);
+                const addr = this.getTokenAddress(symbolUpper);
+                if (!addr || addr === '0x0000000000000000000000000000000000000000') {
+                    console.warn(`No address found for token symbol: ${s}`);
+                    // Still add it with 0 so UI shows it
+                    tokens[s] = '0.000000';
+                    continue;
+                }
+                
+                console.log(`Fetching balance for ${s} (${symbolUpper}) at address: ${addr}`);
                 const token = new ethers.Contract(addr, ERC20_ABI, this.wallet as any);
-                const raw = await token.balanceOf(address);
+                
+                // Get decimals first
                 let decimals = 18;
-                try { decimals = Number(await token.decimals()); } catch (_) { decimals = 18; }
+                try { 
+                    decimals = Number(await token.decimals()); 
+                    console.log(`Token ${s} decimals: ${decimals}`);
+                } catch (decimalsErr: any) {
+                    console.warn(`Could not get decimals for ${s}, using 18:`, decimalsErr.message);
+                    decimals = 18;
+                }
+                
+                // Force fresh balance by using latest block tag
+                const raw = await token.balanceOf(address, { blockTag: 'latest' });
                 const formatted = ethers.formatUnits(raw, decimals);
+                
                 // Normalize to fixed 6-decimal string to avoid NaN in UI
                 const num = Number(formatted);
-                tokens[s] = Number.isFinite(num) ? num.toFixed(6) : '0.000000';
+                if (Number.isFinite(num) && num >= 0) {
+                    tokens[s] = num.toFixed(6);
+                    console.log(`Token ${s} balance: ${tokens[s]} (raw: ${raw.toString()})`);
+                } else {
+                    console.warn(`Invalid balance number for ${s}: ${formatted}`);
+                    tokens[s] = '0.000000';
+                }
             } catch (e: any) {
+                const addr = this.getTokenAddress(symbolUpper);
+                console.error(`Failed to fetch balance for ${s} (${addr}):`, e.message || e);
+                // Still add it with 0 so UI shows the token was checked
                 tokens[s] = '0.000000';
             }
         }
+        console.log('Final balances:', { native, tokens });
         return { native, tokens };
     }
 
@@ -273,12 +324,39 @@ export class SmartWalletService {
      */
     private async handleTradeCommand(message: string): Promise<ChatResponse> {
         try {
-            const tradeCmd = await (this.aiAgent as any).executeTradeCommand(message);
+            const tradeCmd: TradeCommand | null = await (this.aiAgent as any).executeTradeCommand(message);
 
             if (!tradeCmd) {
                 return {
                     message: 'Could not parse trade command. Try: "Buy 10 CRO worth of USDC"',
                     status: 'Error'
+                };
+            }
+
+            // Check if wallet is set
+            if (!this.wallet) {
+                return {
+                    message: `⚠️ **Wallet Not Connected**\n\n` +
+                             `Please start the agent first by calling the /start endpoint with your private key.\n` +
+                             `The trade command was parsed but cannot be executed without a wallet connection.`,
+                    status: 'Error',
+                    actions: [{
+                        type: 'trade_executed',
+                        details: { ...tradeCmd, error: 'Wallet not connected' }
+                    }]
+                };
+            }
+
+            // Check if wallet has provider
+            if (!this.wallet.provider) {
+                return {
+                    message: `⚠️ **Wallet Provider Not Set**\n\n` +
+                             `The wallet is connected but has no provider. Please ensure the agent was started with a valid RPC URL.`,
+                    status: 'Error',
+                    actions: [{
+                        type: 'trade_executed',
+                        details: { ...tradeCmd, error: 'Wallet provider not set' }
+                    }]
                 };
             }
 
@@ -304,40 +382,134 @@ export class SmartWalletService {
             if (this.wallet && this.routerAddress) {
                 try {
                     const result = await this.executeSwap(tradeCmd);
-                    const balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+                    // Wait a moment for state to propagate, then fetch balances
+                    let balances: { native: string; tokens: Record<string, string> } | null = null;
+                    let balanceError: string | null = null;
+                    
+                    try {
+                        balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+                        console.log('Fetched balances after on-chain trade:', balances);
+                    } catch (err: any) {
+                        console.error('Failed to fetch balances after on-chain trade:', err);
+                        balanceError = err.message || String(err);
+                        // Try fallback to get at least native balance
+                        try {
+                            if (this.wallet?.provider) {
+                                const address = await this.wallet.getAddress();
+                                const nativeBig = await this.wallet.provider.getBalance(address, 'latest');
+                                const native = ethers.formatEther(nativeBig as any);
+                                balances = {
+                                    native: Number(native).toFixed(6),
+                                    tokens: {}
+                                };
+                            }
+                        } catch (fallbackErr) {
+                            balances = {
+                                native: '0.000000',
+                                tokens: { [tradeCmd.tokenIn]: '0.000000', [tradeCmd.tokenOut]: '0.000000' }
+                            };
+                        }
+                    }
+                    
+                    const actions: any[] = [
+                        { type: 'trade_executed', details: { ...tradeCmd, tx: result.txHash } }
+                    ];
+                    
+                    if (balances) {
+                        actions.push({ type: 'balance_update', details: balances });
+                    }
+                    
+                    let replyMessage = `✅ Trade executed on-chain: ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`;
+                    if (result.txHash && result.txHash !== 'unknown-tx') {
+                        replyMessage += `\n\nTransaction: ${result.txHash}`;
+                    }
+                    if (balanceError) {
+                        replyMessage += `\n\n⚠️ Note: Could not fully fetch updated balances: ${balanceError}`;
+                    }
+                    
                     return {
-                        message: `✅ Trade executed on-chain: ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`,
+                        message: replyMessage,
                         status: 'Success',
-                        actions: [
-                            { type: 'trade_executed', details: { ...tradeCmd, tx: result.txHash } },
-                            { type: 'balance_update', details: balances }
-                        ]
+                        actions
                     };
                 } catch (e: any) {
+                    // Even if swap fails, try to show current balances
+                    let balances: { native: string; tokens: Record<string, string> } | null = null;
+                    try {
+                        balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+                    } catch (balanceErr) {
+                        // Ignore balance errors if swap already failed
+                    }
+                    
+                    const actions: any[] = [
+                        { type: 'trade_executed', details: { ...tradeCmd, error: e.message } }
+                    ];
+                    
+                    if (balances) {
+                        actions.push({ type: 'balance_update', details: balances });
+                    }
+                    
                     return {
-                        message: `On-chain trade failed: ${e.message}`,
-                        status: 'Error'
+                        message: `❌ On-chain trade failed: ${e.message}\n\nCurrent balances shown below.`,
+                        status: 'Error',
+                        actions
                     };
                 }
             }
 
-            // Fallback: simulated execution
-            if (this.wallet) {
-                const balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
-                return {
-                    message: `✅ Trade executed (simulated): ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`,
-                    status: 'Success',
-                    actions: [
-                        { type: 'trade_executed', details: tradeCmd },
-                        { type: 'balance_update', details: balances }
-                    ]
-                };
+            // Fallback: simulated execution (wallet set but no router)
+            // Always try to fetch and display current balances
+            let balances: { native: string; tokens: Record<string, string> } | null = null;
+            let balanceError: string | null = null;
+            
+            try {
+                balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+                console.log('Fetched balances after simulated trade:', balances);
+            } catch (err: any) {
+                console.error('Failed to fetch balances after simulated trade:', err);
+                balanceError = err.message || String(err);
+                // Try to get at least native balance as fallback
+                try {
+                    if (this.wallet?.provider) {
+                        const address = await this.wallet.getAddress();
+                        const nativeBig = await this.wallet.provider.getBalance(address, 'latest');
+                        const native = ethers.formatEther(nativeBig as any);
+                        balances = {
+                            native: Number(native).toFixed(6),
+                            tokens: {}
+                        };
+                    }
+                } catch (fallbackErr) {
+                    // If even fallback fails, create empty balances
+                    balances = {
+                        native: '0.000000',
+                        tokens: { [tradeCmd.tokenIn]: '0.000000', [tradeCmd.tokenOut]: '0.000000' }
+                    };
+                }
             }
-
+            
+            const actions: any[] = [
+                { type: 'trade_executed', details: tradeCmd }
+            ];
+            
+            if (balances) {
+                actions.push({ type: 'balance_update', details: balances });
+            }
+            
+            let replyMessage = `✅ Trade executed (simulated): ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`;
+            if (!this.routerAddress) {
+                replyMessage += `\n\nℹ️ Note: Router not configured (ROUTER_ADDRESS), so this was simulated.`;
+            }
+            if (balanceError) {
+                replyMessage += `\n\n⚠️ Warning: Could not fully fetch balances: ${balanceError}`;
+            } else {
+                replyMessage += `\n\nCurrent wallet balances shown below.`;
+            }
+            
             return {
-                message: `✅ Trade executed (simulated): ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`,
+                message: replyMessage,
                 status: 'Success',
-                actions: [{ type: 'trade_executed', details: tradeCmd }]
+                actions
             };
 
         } catch (error: any) {
@@ -375,13 +547,15 @@ export class SmartWalletService {
      * Get token address by symbol (mock addresses for demo)
      */
     private getTokenAddress(symbol: string): string {
+        const symbolUpper = symbol.toUpperCase();
         const addresses: { [key: string]: string } = {
+            'CRO': '0x0000000000000000000000000000000000000000', // Native CRO - use zero address as marker
             'WCRO': '0x5C7F8A570d578ED84E63fdFA7b1eE72dEae1AE23',
             'USDC': '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59',
             'WBTC': '0x062E66477Faf219F25D27dCED647BF57C3107d52',
             'ETH': '0xe44Fd7fCb2b1581822D0c862B68222998a0c299a'
         };
-        return addresses[symbol] || addresses['WCRO'];
+        return addresses[symbolUpper] || addresses['WCRO'];
     }
 
     /**
@@ -401,17 +575,79 @@ export class SmartWalletService {
         try {
             const result = await this.executeSwap(tradeCmd);
             this.pendingTrade = null;
-            const balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+            
+            // Fetch updated balances after swap
+            let balances: { native: string; tokens: Record<string, string> } | null = null;
+            let balanceError: string | null = null;
+            
+            try {
+                balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+                console.log('Fetched balances after confirmed trade:', balances);
+            } catch (err: any) {
+                console.error('Failed to fetch balances after confirmed trade:', err);
+                balanceError = err.message || String(err);
+                // Try fallback
+                try {
+                    if (this.wallet?.provider) {
+                        const address = await this.wallet.getAddress();
+                        const nativeBig = await this.wallet.provider.getBalance(address, 'latest');
+                        const native = ethers.formatEther(nativeBig as any);
+                        balances = {
+                            native: Number(native).toFixed(6),
+                            tokens: {}
+                        };
+                    }
+                } catch (fallbackErr) {
+                    balances = {
+                        native: '0.000000',
+                        tokens: { [tradeCmd.tokenIn]: '0.000000', [tradeCmd.tokenOut]: '0.000000' }
+                    };
+                }
+            }
+            
+            const actions: any[] = [
+                { type: 'trade_executed', details: { ...tradeCmd, tx: result.txHash } }
+            ];
+            
+            if (balances) {
+                actions.push({ type: 'balance_update', details: balances });
+            }
+            
+            let message = `✅ Confirmed and executed: ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`;
+            if (result.txHash && result.txHash !== 'unknown-tx') {
+                message += `\n\nTransaction: ${result.txHash}`;
+            }
+            if (balanceError) {
+                message += `\n\n⚠️ Note: Could not fully fetch updated balances: ${balanceError}`;
+            }
+            
             return {
-                message: `✅ Confirmed and executed: ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`,
+                message,
                 status: 'Success',
-                actions: [
-                    { type: 'trade_executed', details: { ...tradeCmd, tx: result.txHash } },
-                    { type: 'balance_update', details: balances }
-                ]
+                actions
             };
         } catch (e: any) {
-            return { message: `Execution failed: ${e.message}`, status: 'Error' };
+            // Try to show current balances even if execution failed
+            let balances: { native: string; tokens: Record<string, string> } | null = null;
+            try {
+                balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
+            } catch (balanceErr) {
+                // Ignore
+            }
+            
+            const actions: any[] = [
+                { type: 'trade_executed', details: { ...tradeCmd, error: e.message } }
+            ];
+            
+            if (balances) {
+                actions.push({ type: 'balance_update', details: balances });
+            }
+            
+            return {
+                message: `❌ Execution failed: ${e.message}${balances ? '\n\nCurrent balances shown below.' : ''}`,
+                status: 'Error',
+                actions
+            };
         }
     }
 
@@ -434,10 +670,79 @@ export class SmartWalletService {
 
         try {
             const result = await this.sendTokens(tokenAddress, to, amount);
-            const balances = await this.getWalletBalances([symbol]);
-            return { message: `✅ Sent ${amount} ${symbol} to ${to}. Tx: ${result.txHash}`, status: 'Success', actions: [{ type: 'transfer', details: { to, amount, symbol, tx: result.txHash } }, { type: 'balance_update', details: balances }] };
+            
+            // Fetch updated balances after transfer
+            let balances: { native: string; tokens: Record<string, string> } | null = null;
+            let balanceError: string | null = null;
+            
+            try {
+                balances = await this.getWalletBalances([symbol]);
+                console.log('Fetched balances after transfer:', balances);
+            } catch (err: any) {
+                console.error('Failed to fetch balances after transfer:', err);
+                balanceError = err.message || String(err);
+                // Try fallback
+                try {
+                    if (this.wallet?.provider) {
+                        const address = await this.wallet.getAddress();
+                        const nativeBig = await this.wallet.provider.getBalance(address, 'latest');
+                        const native = ethers.formatEther(nativeBig as any);
+                        balances = {
+                            native: Number(native).toFixed(6),
+                            tokens: {}
+                        };
+                    }
+                } catch (fallbackErr) {
+                    balances = {
+                        native: '0.000000',
+                        tokens: { [symbol]: '0.000000' }
+                    };
+                }
+            }
+            
+            const actions: any[] = [
+                { type: 'transfer', details: { to, amount, symbol, tx: result.txHash } }
+            ];
+            
+            if (balances) {
+                actions.push({ type: 'balance_update', details: balances });
+            }
+            
+            let message = `✅ Sent ${amount} ${symbol} to ${to}`;
+            if (result.txHash && result.txHash !== 'unknown-tx') {
+                message += `\n\nTransaction: ${result.txHash}`;
+            }
+            if (balanceError) {
+                message += `\n\n⚠️ Note: Could not fully fetch updated balances: ${balanceError}`;
+            }
+            
+            return {
+                message,
+                status: 'Success',
+                actions
+            };
         } catch (e: any) {
-            return { message: `Transfer failed: ${e.message}`, status: 'Error' };
+            // Try to show current balances even if transfer failed
+            let balances: { native: string; tokens: Record<string, string> } | null = null;
+            try {
+                balances = await this.getWalletBalances([symbol]);
+            } catch (balanceErr) {
+                // Ignore
+            }
+            
+            const actions: any[] = [
+                { type: 'transfer', details: { to, amount, symbol, error: e.message } }
+            ];
+            
+            if (balances) {
+                actions.push({ type: 'balance_update', details: balances });
+            }
+            
+            return {
+                message: `❌ Transfer failed: ${e.message}${balances ? '\n\nCurrent balances shown below.' : ''}`,
+                status: 'Error',
+                actions
+            };
         }
     }
 
@@ -477,12 +782,43 @@ export class SmartWalletService {
         const swapTx = await router.swapExactTokensForTokens(amountIn, minOut, path, owner, deadline);
         const rc = await swapTx.wait?.();
         const txHash = rc?.transactionHash || swapTx.hash || 'unknown-tx';
+        
+        // Wait for state to propagate after transaction confirmation
+        // This ensures balances are updated when we fetch them
+        if (rc?.blockNumber) {
+            try {
+                // Wait for the next block to ensure state is updated
+                const confirmationBlock = rc.blockNumber;
+                let attempts = 0;
+                const maxAttempts = 20; // Max 10 seconds (20 * 500ms)
+                while (attempts < maxAttempts) {
+                    const latestBlock = await provider.getBlockNumber();
+                    if (latestBlock > confirmationBlock) {
+                        break;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    attempts++;
+                }
+                // Add a small additional delay to ensure state propagation
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (e) {
+                // Fallback: wait 3 seconds for state to propagate
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+        } else {
+            // Fallback: wait 3 seconds for state to propagate
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+        
         return { txHash };
     }
 
     /** Send ERC20 token to recipient. If symbol is native CRO, send native transfer. */
     private async sendTokens(tokenAddress: string, to: string, amount: number): Promise<{ txHash: string }> {
         if (!this.wallet) throw new Error('Wallet not set');
+
+        const provider = this.wallet.provider;
+        if (!provider) throw new Error('Wallet has no provider');
 
         const token = new ethers.Contract(tokenAddress, ERC20_ABI, this.wallet as any);
         let decimals = 18;
@@ -491,6 +827,32 @@ export class SmartWalletService {
         const tx = await token.transfer(to, amountWei);
         const rc = await tx.wait?.();
         const txHash = rc?.transactionHash || tx.hash || 'unknown-tx';
+        
+        // Wait for state to propagate after transaction confirmation
+        if (rc?.blockNumber) {
+            try {
+                const confirmationBlock = rc.blockNumber;
+                let attempts = 0;
+                const maxAttempts = 20; // Max 10 seconds (20 * 500ms)
+                while (attempts < maxAttempts) {
+                    const latestBlock = await provider.getBlockNumber();
+                    if (latestBlock > confirmationBlock) {
+                        break;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    attempts++;
+                }
+                // Add a small additional delay to ensure state propagation
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (e) {
+                // Fallback: wait 3 seconds for state to propagate
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+        } else {
+            // Fallback: wait 3 seconds for state to propagate
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+        
         return { txHash };
     }
 

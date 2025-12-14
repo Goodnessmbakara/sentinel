@@ -10,7 +10,7 @@ import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
 import { AiAgentClient } from '../analysis/aiAgentClient';
 import { ChatHistoryRepository } from '../persistence/chatHistoryRepository';
-import { logger } from '../utils/logger';
+import { logger, getRecentLogs } from '../utils/logger';
 import { metrics } from '../utils/metrics';
 
 dotenv.config();
@@ -62,6 +62,7 @@ app.get('/health', (req, res) => {
         const health = {
             status: 'ok',
             agentRunning: agentService.isAgentRunning(),
+            agentReady: typeof (agentService as any).isReady === 'function' ? (agentService as any).isReady() : false,
             metrics: metrics.snapshot(),
             timestamp: Date.now()
         };
@@ -69,6 +70,17 @@ app.get('/health', (req, res) => {
     } catch (e: any) {
         logger.error('Health check failed', { error: e });
         res.status(500).json({ status: 'error' });
+    }
+});
+
+app.get('/logs/recent', (req, res) => {
+    try {
+        const limit = Number(req.query.limit || 100);
+        const logs = getRecentLogs(limit);
+        res.json({ ok: true, logs });
+    } catch (e: any) {
+        logger.error('Failed to fetch recent logs', { error: e?.message || String(e) });
+        res.status(500).json({ ok: false, error: e?.message || String(e) });
     }
 });
 
@@ -107,6 +119,42 @@ app.post('/start', async (req, res) => {
 app.post('/stop', (req, res) => {
     agentService.stop();
     res.json({ message: 'Agent stopped' });
+});
+
+// One-shot scan endpoint: analyze a set of tokens immediately and return decisions
+app.post('/scan', async (req, res) => {
+    const tokens: string[] = req.body.tokens || ["0xTokenA", "0xTokenB"];
+    try {
+        const results: any[] = [];
+        for (const t of tokens) {
+            try {
+                const decision = await agentService.analyzeAndTrade(t);
+                // Build a friendly summary for UI
+                let summary = 'No decision';
+                if (!decision) {
+                    summary = 'Analysis failed or returned no decision';
+                } else if (decision.shouldTrade) {
+                    summary = `${decision.action} — amount ${decision.amount} — ${decision.reasoning}`;
+                } else {
+                    summary = `No trade (${decision.action}) — ${decision.reasoning}`;
+                }
+
+                results.push({ token: t, decision, summary });
+            } catch (e: any) {
+                // Normalize error message and capture stack when available
+                const errMsg = (e && (e.message ?? (() => {
+                    try { return JSON.stringify(e); } catch (_) { return String(e); }
+                })())) || String(e) || 'Unknown error';
+                const errStack = e?.stack || undefined;
+                logger.error('Scan token failed', { token: t, error: errMsg, stack: errStack });
+                results.push({ token: t, error: errMsg, errorStack: errStack, summary: `Error: ${errMsg}` });
+            }
+        }
+        res.json({ ok: true, results });
+    } catch (e: any) {
+        logger.error('Scan failed', { error: e });
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/config/risk', (req, res) => {
