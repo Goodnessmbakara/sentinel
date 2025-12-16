@@ -2,12 +2,16 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import './index.css';
 import { ChatInterface } from './components/ChatInterface';
+import ScanResults from './components/ScanResults';
+import LogViewer from './components/LogViewer';
 
 const API_URL = 'http://localhost:3001';
 
 interface Status {
   status: string;
   timestamp: number;
+  agentRunning?: boolean;
+  agentReady?: boolean;
 }
 
 function App() {
@@ -15,24 +19,22 @@ function App() {
   const [lastHeartbeat, setLastHeartbeat] = useState<number>(0);
   const [mode, setMode] = useState<'GUARDIAN' | 'HUNTER'>('GUARDIAN');
   const [logs, setLogs] = useState<string[]>([]);
+  const [scanResults, setScanResults] = useState<any[]>([]);
+  const [recentLogs, setRecentLogs] = useState<any[]>([]);
 
   useEffect(() => {
     const pollStatus = async () => {
       try {
-        const res = await axios.get<Status>(`${API_URL}/status`);
-        // If API responds, we assume it's "Ready" or "Running" if we track that.
-        // For now API just says "OK"
-        // But we want to track if "Agent Service" is strictly running loop.
-        // API server currently doesn't expose `isRunning` explicitly in the basic /status response I implemented.
-        // I should update API to return isRunning?
-        // Assuming API always OK means Agent is online. Start/Stop toggles logic.
-        // Let's assume we maintain local "Running" state or trust API.
-        // I'll stick to "ONLINE" for API connection.
-        // But for "Running" (Trading Loop), I need to ask API.
-        // In Step 312, I mocked: res.json({ status: 'OK', ... }).
-        // I will assume ONLINE.
-        setStatus('ONLINE');
-        setLastHeartbeat(res.data.timestamp);
+        const res = await axios.get<Status>(`${API_URL}/health`);
+        const body = res.data;
+        setLastHeartbeat(body.timestamp || Date.now());
+
+        if (body.agentRunning) {
+          if (body.agentReady) setStatus('RUNNING');
+          else setStatus('INITIALIZING');
+        } else {
+          setStatus('ONLINE');
+        }
       } catch (e) {
         setStatus('OFFLINE');
       }
@@ -48,6 +50,28 @@ function App() {
       // Send empty body - API will use environment variables
       await axios.post(`${API_URL}/start`, {});
       addLog("Agent Started");
+
+      // Immediately trigger a one-shot scan so the UI shows any trade decisions
+      try {
+        const scanRes = await axios.post(`${API_URL}/scan`, {});
+        const results = scanRes.data.results || [];
+        setScanResults(results);
+        if (results.length === 0) addLog('Scan completed: no tokens scanned');
+        for (const r of results) {
+          const summary = r.summary || (r.decision ? `${r.decision.action} ${r.decision.amount}` : `error ${r.error}`);
+          addLog(`Scan:${r.token} -> ${summary}`);
+        }
+      } catch (scanErr: any) {
+        addLog(`Scan error: ${scanErr.response?.data?.error || scanErr.message}`);
+      }
+
+      // Also fetch recent logs for debugging
+      try {
+        const logsRes = await axios.get(`${API_URL}/logs/recent?limit=200`);
+        setRecentLogs(logsRes.data.logs || []);
+      } catch (logsErr: any) {
+        addLog(`Logs fetch error: ${logsErr.response?.data?.error || logsErr.message}`);
+      }
     } catch (e: any) {
       addLog(`Error starting: ${e.response?.data?.error || e.message}`);
     }
@@ -117,6 +141,18 @@ function App() {
           </div>
         </div>
 
+        <div style={{ marginTop: 12 }}>
+          <button className="btn-secondary" onClick={async () => {
+            try {
+              const res = await axios.get(`${API_URL}/logs/recent?limit=200`);
+              setRecentLogs(res.data.logs || []);
+              addLog('Fetched recent logs');
+            } catch (err: any) {
+              addLog(`Failed to fetch logs: ${err.message}`);
+            }
+          }}>Fetch Recent Logs</button>
+        </div>
+
         <div className="metric-grid">
           <div className="metric-item">
             <div className="metric-value">CRC 25</div>
@@ -134,6 +170,7 @@ function App() {
       </main>
       
       <ChatInterface />
+      <ScanResults results={scanResults} />
       
       <section className="glass-card">
         <h2>Activity Log</h2>
@@ -148,3 +185,4 @@ function App() {
 }
 
 export default App;
+

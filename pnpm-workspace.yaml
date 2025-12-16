@@ -1,0 +1,5 @@
+ignoredBuiltDependencies:
+  - better-sqlite3
+  - keccak
+  - secp256k1
+  - unrs-resolver
