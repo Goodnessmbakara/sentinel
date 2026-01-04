@@ -44,6 +44,32 @@ const agentService = new AgentService(
 // Chat history repository (persist conversations)
 const chatRepo = new ChatHistoryRepository();
 
+// Auto-initialize agent if PRIVATE_KEY is present in environment
+(async () => {
+    const privateKey = process.env.PRIVATE_KEY;
+    if (privateKey) {
+        try {
+            const rpcUrl = process.env.RPC_URL || 'https://evm-t3.cronos.org';
+            const provider = new ethers.JsonRpcProvider(rpcUrl);
+            const signer = new ethers.Wallet(privateKey, provider);
+            const address = await signer.getAddress();
+            
+            const contractAddress = process.env.CONTRACT_ADDRESS;
+            await agentService.start(signer, contractAddress);
+            
+            logger.info('✓ Agent auto-initialized on startup', { 
+                wallet: address,
+                network: rpcUrl,
+                contract: contractAddress || 'none (analysis-only mode)'
+            });
+        } catch (error: any) {
+            logger.error('Failed to auto-initialize agent', { error: error.message });
+        }
+    } else {
+        logger.warn('⚠ PRIVATE_KEY not set - agent will need manual initialization via /start endpoint');
+    }
+})();
+
 // --- Routes ---
 
 app.get('/status', (req, res) => {

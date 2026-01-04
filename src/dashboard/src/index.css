@@ -272,7 +272,7 @@ button {
   border-radius: 1rem;
   max-width: 85%;
   position: relative;
-  line-height: 1.5;
+  line-height: 1.4;
   font-size: 0.95rem;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
   animation: fadeIn 0.4s cubic-bezier(0.165, 0.84, 0.44, 1);
@@ -310,8 +310,8 @@ button {
 }
 
 .message-content p {
-  margin: 0.25rem 0;
-  line-height: 1.5;
+  margin: 0.1rem 0;
+  line-height: 1.4;
 }
 
 .message-content strong {

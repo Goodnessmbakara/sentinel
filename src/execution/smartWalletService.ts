@@ -234,12 +234,15 @@ export class SmartWalletService {
             };
         }
         try {
-            const address = await this.wallet.getAddress();
+            // Check if user specified a different address in their message
+            const addressMatch = message.match(/0x[a-fA-F0-9]{40}/);
+            const targetAddress = addressMatch ? addressMatch[0] : await this.wallet.getAddress();
+            const isOwnWallet = targetAddress.toLowerCase() === (await this.wallet.getAddress()).toLowerCase();
 
             // Use the provider to fetch native balance
             const provider = this.wallet.provider;
             if (!provider) throw new Error('Wallet has no provider');
-            const nativeBalanceBig = await provider.getBalance(address);
+            const nativeBalanceBig = await provider.getBalance(targetAddress);
             const croBalance = ethers.formatEther(nativeBalanceBig as any);
             const valueUsd = parseFloat(croBalance) * 0.12; // Rough CRO price
 
@@ -253,7 +256,7 @@ export class SmartWalletService {
                     const tokenAddress = this.getTokenAddress(symbol);
                     try {
                         const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, this.wallet.provider as any);
-                        const raw = await tokenContract.balanceOf(address);
+                        const raw = await tokenContract.balanceOf(targetAddress);
                         let decimals = 18;
                         try { decimals = Number(await tokenContract.decimals()); } catch (_) { decimals = 18; }
                         const formatted = ethers.formatUnits(raw, decimals);
@@ -264,16 +267,17 @@ export class SmartWalletService {
                 }
             }
 
+            const walletLabel = isOwnWallet ? 'Your Wallet Balance' : 'Wallet Balance';
             return {
-                message: `💰 **Your Wallet Balance**\n\n` +
-                         `Address: \`${address.slice(0, 6)}...${address.slice(-4)}\`\n` +
+                message: `💰 **${walletLabel}**\n\n` +
+                         `Address: \`${targetAddress.slice(0, 6)}...${targetAddress.slice(-4)}\`\n` +
                          `CRO: **${parseFloat(croBalance).toFixed(6)} CRO**\n` +
                          `Value: ~$${valueUsd.toFixed(2)} USD` +
                          tokenLine,
                 status: 'Success',
                 actions: [{
                     type: 'balance_query',
-                    details: { balance: croBalance, valueUsd }
+                    details: { address: targetAddress, balance: croBalance, valueUsd }
                 }]
             };
         } catch (error: any) {
