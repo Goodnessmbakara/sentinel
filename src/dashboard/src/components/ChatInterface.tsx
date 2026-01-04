@@ -181,10 +181,10 @@ export function ChatInterface() {
                 {messages.map((msg) => (
                     <div
                         key={msg.id}
-                        className={`message-bubble ${msg.role}`}
+                        className={`message-bubble ${msg.role} ${msg.status || ''}`}
                     >
                         <div className="message-role">
-                            {msg.role === 'user' ? '👤 You' : '🤖 Assistant'}
+                            {msg.role === 'user' ? '👤 YOU' : '🤖 SENTINEL AI'}
                         </div>
                         <div className="message-content">
                             {msg.content.split('\n').map((line, i) => {
@@ -199,9 +199,14 @@ export function ChatInterface() {
                                 );
                             })}
                         </div>
-                        {msg.status === 'error' && (
-                            <div className="message-error">⚠️ Error</div>
-                        )}
+                        <div className="message-footer">
+                            <span className="message-time">
+                                {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                            {msg.status === 'error' && (
+                                <span className="message-error-tag">! Error</span>
+                            )}
+                        </div>
                     </div>
                 ))}
 
@@ -233,7 +238,13 @@ export function ChatInterface() {
                     className="btn-send"
                     disabled={isLoading || !input.trim()}
                 >
-                    {isLoading ? '⏳' : '📤'}
+                    {isLoading ? (
+                        <div className="btn-spinner"></div>
+                    ) : (
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M7 11L12 6L17 11M12 18V7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                    )}
                 </button>
             </form>
         </div>

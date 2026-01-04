@@ -1,3 +1,6 @@
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import { AgentService } from '../execution/agentService';
@@ -7,13 +10,10 @@ import { HypeFilter } from '../analysis/hypeFilter';
 import { RiskEvaluator } from '../analysis/riskEvaluator';
 import { GUARDIAN_PROFILE, HUNTER_PROFILE, UserRiskProfile } from '../models/types';
 import { ethers } from 'ethers';
-import * as dotenv from 'dotenv';
 import { AiAgentClient } from '../analysis/aiAgentClient';
 import { ChatHistoryRepository } from '../persistence/chatHistoryRepository';
 import { logger, getRecentLogs } from '../utils/logger';
 import { metrics } from '../utils/metrics';
-
-dotenv.config();
 
 const app = express();
 app.use(cors());
@@ -123,7 +123,8 @@ app.post('/stop', (req, res) => {
 
 // One-shot scan endpoint: analyze a set of tokens immediately and return decisions
 app.post('/scan', async (req, res) => {
-    const tokens: string[] = req.body.tokens || ["0xTokenA", "0xTokenB"];
+    // Use watchlist tokens as default if none provided
+    const tokens: string[] = req.body.tokens || (await agentService.getDiscoveryService().getTokensToScan());
     try {
         const results: any[] = [];
         for (const t of tokens) {
@@ -169,7 +170,7 @@ app.post('/config/risk', (req, res) => {
 
 // Chat endpoint for smart wallet
 app.post('/chat', async (req, res) => {
-    const { message } = req.body;
+    const { message } =req.body;
     if (!message) {
         res.status(400).json({ error: 'Missing message' });
         return;
@@ -180,7 +181,15 @@ app.post('/chat', async (req, res) => {
         const { EnhancedAiAgent } = await import('../analysis/enhancedAiAgent');
         const { SmartWalletService } = await import('../execution/smartWalletService');
         
-        const agent = new EnhancedAiAgent();
+        // Load recent conversation history (last 15 messages, excluding the current one)
+        const recentHistory = chatRepo.getRecent(15);
+        const conversationHistory = recentHistory.map((msg: any) => ({
+            role: msg.role as 'user' | 'assistant',
+            content: msg.content
+        }));
+
+        // Initialize AI agent with conversation history for memory
+        const agent = new EnhancedAiAgent(conversationHistory);
         const walletService = new SmartWalletService(agent, agentService);
 
         // Persist user message immediately so history is available even if processing fails

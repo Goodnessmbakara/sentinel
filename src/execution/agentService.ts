@@ -133,15 +133,24 @@ export class AgentService {
     }
 
     private async processTokens() {
-        // Dynamically discover tokens instead of hardcoding
+        // Dynamically discover tokens
         const tokensToScan = await this.tokenDiscovery.getTokensToScan();
         
         metrics.inc('tokens.scanned', tokensToScan.length);
         logger.info('Processing tokens', { count: tokensToScan.length, tokens: tokensToScan });
         
+        if (tokensToScan.length === 0) {
+            logger.warn('No tokens discovered to scan. Check TokenDiscoveryService or watchlist.');
+            return;
+        }
+
         for (const token of tokensToScan) {
             await this.analyzeAndTrade(token);
         }
+    }
+
+    public getDiscoveryService(): TokenDiscoveryService {
+        return this.tokenDiscovery;
     }
 
 

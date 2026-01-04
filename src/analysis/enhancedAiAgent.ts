@@ -47,7 +47,7 @@ export class EnhancedAiAgent {
     private processingQueue: boolean = false;
     private minIntervalMs: number = Number(process.env.LLM_MIN_INTERVAL_MS || 2000); // throttle interval (ms)
 
-    constructor() {
+    constructor(conversationHistory?: Array<{ role: 'user' | 'assistant', content: string }>) {
         const apiKey = process.env.LLM_API_KEY?.trim();
 
         console.log('🔍 Gemini API Key Debug:');
@@ -68,29 +68,64 @@ export class EnhancedAiAgent {
                     }
                 });
                 
-                // Initialize chat session for conversation memory with system context
-                this.chatSession = this.model.startChat({
-                    history: [
-                        {
-                            role: 'user',
-                            parts: [{ text: 'You are a Bloomberg-style professional cryptocurrency trading assistant for the Cronos network. Provide concise, factual, and data-driven answers suitable for a trading desk audience. Prioritize structured output where possible (JSON for data, short markdown for human explanation). Responsibilities: 1) Report wallet balances and token holdings, 2) Analyze market sentiment and provide clear BUY/SELL/HOLD recommendations with confidence and reasoning, 3) Parse and validate trade instructions and outline any required confirmations, 4) When executing swaps, provide transaction metadata and post-trade balances. Be precise, avoid speculation, and include numeric scores and short reasoning.' }],
-                        },
-                        {
-                            role: 'model',
-                            parts: [{ text: 'Understood. I am your Cronos trading assistant. I can help you check balances, analyze markets, and execute trades on the Cronos network. How can I assist you today?' }],
-                        }
-                    ]
-                });
+                // Build conversation history for Gemini
+                const history: Array<{ role: string, parts: Array<{ text: string }> }> = [
+                    // System instruction
+                    {
+                        role: 'user',
+                        parts: [{ text: `You are Sentinel AI, an intelligent cryptocurrency trading assistant for the Cronos network with AGENTIC MEMORY.
+
+CORE RESPONSIBILITIES:
+1. Report wallet balances and token holdings
+2. Analyze market sentiment and provide BUY/SELL/HOLD recommendations
+3. Parse and execute trade commands
+4. Provide transaction metadata and post-trade balances
+
+CRITICAL AGENTIC BEHAVIORS:
+1. **Remember pending user requests** across the conversation
+2. **Automatically resume tasks** when blockers are resolved
+3. **Proactive execution**: If user asked to "check balance" but wallet wasn't connected, and they later say "agent initialized", AUTOMATICALLY check the balance without being asked again
+4. **Context awareness**: Reference previous messages and maintain conversation continuity
+
+RESPONSE STYLE:
+- Concise, factual, data-driven (Bloomberg-style)
+- Structured output (JSON for data, markdown for explanations)
+- Avoid speculation, include numeric scores and reasoning
+
+When you detect a resolved blocker, immediately:
+1. Acknowledge the resolution
+2. Execute the pending action automatically
+3. Provide the results` }],
+                    },
+                    {
+                        role: 'model',
+                        parts: [{ text: 'Understood. I am Sentinel AI, your Cronos trading assistant with memory. I will remember your requests and automatically resume them when blockers are resolved. How can I assist you today?' }],
+                    }
+                ];
+
+                // Add conversation history if provided
+                if (conversationHistory && conversationHistory.length > 0) {
+                    for (const msg of conversationHistory) {
+                        history.push({
+                            role: msg.role === 'user' ? 'user' : 'model',
+                            parts: [{ text: msg.content }]
+                        });
+                    }
+                }
+                
+                // Initialize chat session with full history
+                this.chatSession = this.model.startChat({ history });
                 
                 this.useRealAgent = true;
-                console.log('✓ Enhanced AI Agent initialized with Gemini 2.0 Flash');
+                const historyCount = conversationHistory?.length || 0;
+                console.log(`✓ AI Agent Client initialized with Gemini 2.0 Flash (${historyCount} previous messages loaded)`);
                 console.log(`LLM throttle interval: ${this.minIntervalMs}ms`);
             } catch (error: any) {
                 console.error('❌ Failed to initialize Gemini:', error.message);
                 this.useRealAgent = false;
             }
         } else {
-            console.warn('⚠ LLM_API_KEY not set. Enhanced AI Agent running in mock mode.');
+            console.warn('⚠ LLM_API_KEY not set. AI Agent Client running in mock mode.');
         }
     }
 

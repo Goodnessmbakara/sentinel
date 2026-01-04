@@ -7,7 +7,7 @@ import { validateMarketData } from '../models/validation';
 // Mock MCP Server URL (replace with actual if available or use env)
 // Mock MCP Server URL (replace with actual if available or use env)
 const MCP_SERVER_URL = process.env.MCP_ENDPOINT || 'http://localhost:3000/mcp';
-const ALLOW_MOCK_ON_FAIL = (process.env.MCP_ALLOW_MOCK || 'true').toLowerCase() !== 'false';
+const ALLOW_MOCK_ON_FAIL = (process.env.MCP_ALLOW_MOCK || 'false').toLowerCase() !== 'false';
 
 interface MarketDataCache {
     [tokenAddress: string]: {
