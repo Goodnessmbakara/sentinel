@@ -239,11 +239,17 @@ export class SmartWalletService {
             const targetAddress = addressMatch ? addressMatch[0] : await this.wallet.getAddress();
             const isOwnWallet = targetAddress.toLowerCase() === (await this.wallet.getAddress()).toLowerCase();
 
-            // Use the provider to fetch native balance
+            // Use the provider to fetch native balance with explicit 'latest' block
             const provider = this.wallet.provider;
             if (!provider) throw new Error('Wallet has no provider');
-            const nativeBalanceBig = await provider.getBalance(targetAddress);
+            
+            console.log(`[Balance Query] Fetching balance for ${targetAddress}`);
+            const nativeBalanceBig = await provider.getBalance(targetAddress, 'latest');
+            console.log(`[Balance Query] Raw balance (Wei): ${nativeBalanceBig.toString()}`);
+            
             const croBalance = ethers.formatEther(nativeBalanceBig as any);
+            console.log(`[Balance Query] Formatted balance (CRO): ${croBalance}`);
+            
             const valueUsd = parseFloat(croBalance) * 0.12; // Rough CRO price
 
             // Optionally check for token symbol in the message and include ERC20 balance
