@@ -43,3 +43,6 @@ coverage/
 *.tmp
 temp/
 .temp/
+*.db
+*.db-shm
+*.db-wal

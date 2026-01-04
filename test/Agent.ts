@@ -1,6 +1,7 @@
 import { expect } from "chai";
+import "@nomicfoundation/hardhat-ethers";
 import { ethers } from "hardhat";
-import { Agent } from "../typechain-types";
+// import { Agent } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("Agent Contract", function () {

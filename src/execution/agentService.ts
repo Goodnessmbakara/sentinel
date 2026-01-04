@@ -8,6 +8,7 @@ import { X402Handler } from './x402Handler';
 import { ethers as EthersNamespace } from 'ethers';
 import { logger } from '../utils/logger';
 import { metrics } from '../utils/metrics';
+import { TokenDiscoveryService } from '../data/tokenDiscoveryService';
 
 // Requirements: 6.1, 6.2
 
@@ -16,6 +17,7 @@ export class AgentService {
     private sentimentService: SentimentService;
     private hypeFilter: HypeFilter;
     private riskEvaluator: RiskEvaluator;
+    private tokenDiscovery: TokenDiscoveryService;
     
     // contract
     private agentContract: Contract | null = null;
@@ -41,6 +43,7 @@ export class AgentService {
         this.hypeFilter = hypeFilter;
         this.riskEvaluator = riskEvaluator;
         this.riskProfile = riskProfile;
+        this.tokenDiscovery = new TokenDiscoveryService();
     }
 
     // Getters for Smart Wallet integration
@@ -73,7 +76,7 @@ export class AgentService {
             this.agentContract = new ethers.Contract(contractAddress, abi, signer);
             logger.info('Agent Contract connected', { contractAddress });
         } else {
-            logger.warn('Running in ANALYSIS-ONLY mode (no contract deployed yet)');
+            logger.warn('Running in DIRECT ROUTER mode (no custom contract, using DEX router directly)');
             this.agentContract = null;
         }
         
@@ -118,8 +121,8 @@ export class AgentService {
     // Attempt lightweight probes to ensure downstream dependencies are reachable.
     private async probeDependencies(): Promise<boolean> {
         try {
-            // Try fetching market data for a token; if MCP is unreachable this will throw and be caught.
-            const probeToken = process.env.PROBE_TOKEN || "0xTokenA";
+            // Try fetching market data for a well-known token; if MCP is unreachable this will throw and be caught.
+            const probeToken = process.env.PROBE_TOKEN || "0x5C7F8A570d578ED84E63fdFA7b1eE72dEae1AE23"; // WCRO
             await this.mcpClient.getMarketData(probeToken);
             return true;
         } catch (e) {
@@ -130,35 +133,69 @@ export class AgentService {
     }
 
     private async processTokens() {
-        // In reality, we'd iterate over a list of watched tokens or discover them.
-        // For Hackathon/Demo, let's hardcode a few or fetch "top gainers" from MCP if implemented.
-        const tokensToScan = ["0xTokenA", "0xTokenB"]; 
+        // Dynamically discover tokens instead of hardcoding
+        const tokensToScan = await this.tokenDiscovery.getTokensToScan();
         
         metrics.inc('tokens.scanned', tokensToScan.length);
+        logger.info('Processing tokens', { count: tokensToScan.length, tokens: tokensToScan });
+        
         for (const token of tokensToScan) {
             await this.analyzeAndTrade(token);
         }
     }
 
+
     public async analyzeAndTrade(tokenAddress: string): Promise<TradeDecision | null> {
         const start = Date.now();
         try {
             metrics.inc('analyze.calls');
+            
             // 1. Ingest Data
             const marketData = await this.mcpClient.getMarketData(tokenAddress);
-            const sentimentData = await this.sentimentService.getSentimentData("TOKEN_SYMBOL"); // Need symbol
+            const tokenInfo = this.tokenDiscovery.getTokenInfo(tokenAddress);
+            const tokenSymbol = tokenInfo?.symbol || 'UNKNOWN';
+            
+            const sentimentData = await this.sentimentService.getSentimentData(tokenSymbol);
 
-            // 2. Analyze
-            const analysis = await this.hypeFilter.analyze(marketData, sentimentData);
+            // 2. AI-POWERED ANALYSIS (God Analyst replaces hardcoded logic!)
+            logger.info('🧠 Consulting God Analyst for comprehensive analysis', { token: tokenSymbol });
+            
+            const godAnalyst = await import('../analysis/godAnalystService').then(m => new m.GodAnalystService());
+            const analystSignal = await godAnalyst.analyze(tokenAddress, tokenSymbol, marketData, sentimentData);
 
-            // 3. Risk Eval
-            const decision = this.riskEvaluator.evaluate(analysis, this.riskProfile, tokenAddress, sentimentData, marketData);
+            logger.info('God Analyst decision', { 
+                token: tokenSymbol,
+                action: analystSignal.action,
+                confidence: analystSignal.confidence,
+                reasoning: analystSignal.reasoning,
+                technicalScore: analystSignal.technicalScore,
+                sentimentScore: analystSignal.sentimentScore,
+                riskLevel: analystSignal.riskLevel
+            });
 
-            // 4. Implement X402 (Log or Header)
+            // 3. Implement X402 (Log or Header)
             const header = X402Handler.getHeader("sentinel-agent", "gemini-pro", 1);
             logger.debug('X402 Header', { header });
 
-            // 5. Execute
+            // 4. Build trade decision from analyst signal
+            const shouldTrade = analystSignal.action === 'BUY' && analystSignal.confidence >= this.riskProfile.minConfidenceScore;
+            
+            const decision: TradeDecision = {
+                sentimentData,
+                marketData,
+                analysis: {
+                    signal: analystSignal.action === 'BUY' ? 'VALID_BREAKOUT' : 'NOISE',
+                    confidenceScore: analystSignal.confidence,
+                    reasoning: analystSignal.reasoning,
+                    timestamp: analystSignal.timestamp
+                },
+                shouldTrade,
+                action: analystSignal.action,
+                amount: shouldTrade ? (this.riskProfile.maxPositionSize * analystSignal.suggestedPositionSize / 100) : 0,
+                reasoning: analystSignal.reasoning
+            };
+
+            // 5. Execute trade if conditions met
             if (decision.shouldTrade && this.agentContract) {
                 metrics.inc('trade.executions');
                 logger.info('Executing Trade via agentContract', { action: decision.action, token: tokenAddress });

@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("@typechain/hardhat");
 require("ts-node").register();
 require("dotenv").config();
 

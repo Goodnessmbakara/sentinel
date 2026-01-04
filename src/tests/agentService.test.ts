@@ -11,6 +11,17 @@ jest.mock('../data/mcpClient');
 jest.mock('../data/sentimentService');
 jest.mock('../analysis/hypeFilter');
 jest.mock('../analysis/riskEvaluator');
+jest.mock('../data/tokenDiscoveryService');
+
+const mockAnalyze = jest.fn();
+jest.mock('../analysis/godAnalystService', () => ({
+    GodAnalystService: jest.fn().mockImplementation(() => ({
+        analyze: mockAnalyze
+    }))
+}));
+
+import { TokenDiscoveryService } from '../data/tokenDiscoveryService';
+import { GodAnalystService } from '../analysis/godAnalystService';
 
 describe('AgentService Integration', () => {
     let service: AgentService;
@@ -18,6 +29,8 @@ describe('AgentService Integration', () => {
     let sentimentService: jest.Mocked<SentimentService>;
     let hypeFilter: jest.Mocked<HypeFilter>;
     let riskEvaluator: jest.Mocked<RiskEvaluator>;
+    let tokenDiscovery: jest.Mocked<TokenDiscoveryService>;
+    let godAnalyst: jest.Mocked<GodAnalystService>;
     
     // Test Data
     const mockProfile: UserRiskProfile = {
@@ -33,6 +46,12 @@ describe('AgentService Integration', () => {
         sentimentService = new SentimentService() as any;
         hypeFilter = new HypeFilter() as any;
         riskEvaluator = new RiskEvaluator() as any;
+        tokenDiscovery = new TokenDiscoveryService() as any;
+        godAnalyst = new GodAnalystService() as any;
+        
+        // Mock the discovery return
+        tokenDiscovery.getTokensToScan.mockResolvedValue(['0x1A']);
+        tokenDiscovery.getTokenInfo.mockReturnValue({ name: 'Token', symbol: 'TOK', address: '0x1A' });
         
         service = new AgentService(
             mcpClient,
@@ -51,12 +70,22 @@ describe('AgentService Integration', () => {
         sentimentService.getSentimentData.mockResolvedValue({
             tokenSymbol: 'TOK', sentiment: 'POSITIVE', mentions: 100, smartMoneyMentions: 5, sources: [], timestamp: Date.now()
         });
-        hypeFilter.analyze.mockResolvedValue({
-            signal: 'VALID_BREAKOUT', confidenceScore: 85, reasoning: 'Go', timestamp: Date.now()
+        
+        // Mock God Analyst
+        mockAnalyze.mockResolvedValue({
+            action: 'BUY',
+            confidence: 85,
+            reasoning: 'AI says go',
+            technicalScore: 80,
+            sentimentScore: 90,
+            fundamentalScore: 85,
+            riskLevel: 'LOW',
+            suggestedPositionSize: 100,
+            timestamp: Date.now()
         });
-        riskEvaluator.evaluate.mockReturnValue({
-            shouldTrade: true, action: 'BUY', amount: 100, reasoning: 'Yes'
-        });
+        
+        // Mock the dynamic import if possible, or ensure the service uses the mocked instance
+        // Since AgentService creates it internally, we rely on jest.mock and dynamic import behavior
 
         // Spy on console to check execution logging (since contract is mocked/null in unit test)
         const logSpy = jest.spyOn(console, 'log');
@@ -65,7 +94,8 @@ describe('AgentService Integration', () => {
 
         expect(decision?.shouldTrade).toBe(true);
         expect(mcpClient.getMarketData).toHaveBeenCalledWith('0x1A');
-        expect(riskEvaluator.evaluate).toHaveBeenCalled();
+        // riskEvaluator is no longer called directly in analyzeAndTrade, 
+        // as GodAnalyst replaces it or we use raw result
         
         // Check "Executing Trade" log as proxy for contract interaction in this mock scope
         // (In real logic, we'd mock the contract instance)
@@ -81,9 +111,17 @@ describe('AgentService Integration', () => {
     test('analyzeAndTrade should halt if risk evaluation fails', async () => {
         mcpClient.getMarketData.mockResolvedValue({} as any);
         sentimentService.getSentimentData.mockResolvedValue({} as any);
-        hypeFilter.analyze.mockResolvedValue({} as any);
-        riskEvaluator.evaluate.mockReturnValue({
-            shouldTrade: false, action: 'HOLD', amount: 0, reasoning: 'High Risk'
+        
+        mockAnalyze.mockResolvedValue({
+            action: 'HOLD',
+            confidence: 40,
+            reasoning: 'Too risky',
+            technicalScore: 30,
+            sentimentScore: 40,
+            fundamentalScore: 30,
+            riskLevel: 'HIGH',
+            suggestedPositionSize: 0,
+            timestamp: Date.now()
         });
 
         const decision = await service.analyzeAndTrade('0x1B');

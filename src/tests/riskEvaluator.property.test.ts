@@ -18,13 +18,13 @@ describe('Risk Evaluator Properties', () => {
                         timestamp: Date.now()
                     };
                     
-                    const decision = riskEvaluator.evaluate(analysis, GUARDIAN_PROFILE, '0x123'); // 0x123 not in list likely, but score check comes first or handled check order
+                    const decision = riskEvaluator.evaluate(analysis, GUARDIAN_PROFILE, '0x123', {}, {}); // 0x123 not in list likely, but score check comes first or handled check order
 
                     // If token IS in list, it should fail on score. 
                     // If token IS NOT in list, it should fail on token.
                     // To isolate score property: let's use a token IN the list.
                     const allowedToken = GUARDIAN_PROFILE.allowedTokens[0];
-                    const decisionForAllowed = riskEvaluator.evaluate(analysis, GUARDIAN_PROFILE, allowedToken);
+                    const decisionForAllowed = riskEvaluator.evaluate(analysis, GUARDIAN_PROFILE, allowedToken, {}, {});
 
                     expect(decisionForAllowed.shouldTrade).toBe(false);
                 }
@@ -49,7 +49,7 @@ describe('Risk Evaluator Properties', () => {
                     // Ensure token is NOT in allow list
                     if (GUARDIAN_PROFILE.allowedTokens.includes(token)) return;
 
-                    const decision = riskEvaluator.evaluate(analysis, GUARDIAN_PROFILE, token);
+                    const decision = riskEvaluator.evaluate(analysis, GUARDIAN_PROFILE, token, {}, {});
                     expect(decision.shouldTrade).toBe(false);
                 }
             )
@@ -76,7 +76,7 @@ describe('Risk Evaluator Properties', () => {
                         minConfidenceScore: 50
                     };
 
-                    const decision = riskEvaluator.evaluate(analysis, hunterProfile, token);
+                    const decision = riskEvaluator.evaluate(analysis, hunterProfile, token, {}, {});
                     expect(decision.shouldTrade).toBe(true);
                 }
             )
