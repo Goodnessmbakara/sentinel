@@ -44,13 +44,47 @@ const agentService = new AgentService(
 // Chat history repository (persist conversations)
 const chatRepo = new ChatHistoryRepository();
 
+// Resolve a responsive provider, falling back if the primary RPC is slow/unavailable
+async function resolveProvider(): Promise<ethers.JsonRpcProvider> {
+    const primaryUrl = process.env.RPC_URL || 'https://evm-t3.cronos.org';
+    const fallbackUrl = process.env.RPC_FALLBACK_URL || 'https://evm.cronos.org';
+
+    const withTimeout = async <T>(p: Promise<T>, ms: number): Promise<T> => {
+        return await Promise.race<T>([
+            p,
+            new Promise<T>((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), ms)) as Promise<T>
+        ]);
+    };
+
+    const tryProvider = async (url: string): Promise<ethers.JsonRpcProvider> => {
+        const provider = new ethers.JsonRpcProvider(url);
+        await withTimeout(provider.getBlockNumber(), 7000);
+        return provider;
+    };
+
+    try {
+        return await tryProvider(primaryUrl);
+    } catch (e: any) {
+        if (fallbackUrl && fallbackUrl !== primaryUrl) {
+            try {
+                const provider = await tryProvider(fallbackUrl);
+                logger.warn('Primary RPC timed out; using fallback', { primaryUrl, fallbackUrl });
+                return provider;
+            } catch (e2: any) {
+                logger.error('Both RPC endpoints failed', { primaryUrl, fallbackUrl, errorPrimary: e?.message, errorFallback: e2?.message });
+                throw e2;
+            }
+        }
+        throw e;
+    }
+}
+
 // Auto-initialize agent if PRIVATE_KEY is present in environment
 (async () => {
     const privateKey = process.env.PRIVATE_KEY;
     if (privateKey) {
         try {
-            const rpcUrl = process.env.RPC_URL || 'https://evm-t3.cronos.org';
-            const provider = new ethers.JsonRpcProvider(rpcUrl);
+            const provider = await resolveProvider();
             const signer = new ethers.Wallet(privateKey, provider);
             const address = await signer.getAddress();
             
@@ -59,7 +93,7 @@ const chatRepo = new ChatHistoryRepository();
             
             logger.info('✓ Agent auto-initialized on startup', { 
                 wallet: address,
-                network: rpcUrl,
+                network: (provider as any).connection?.url || 'unknown',
                 contract: contractAddress || 'none (analysis-only mode)'
             });
         } catch (error: any) {
@@ -121,8 +155,7 @@ app.post('/start', async (req, res) => {
     }
     
     try {
-        const rpcUrl = process.env.RPC_URL || 'https://evm-t3.cronos.org';
-        const provider = new ethers.JsonRpcProvider(rpcUrl);
+        const provider = await resolveProvider();
         const signer = new ethers.Wallet(privateKey, provider);
         
         // Verify wallet connection
@@ -133,7 +166,7 @@ app.post('/start', async (req, res) => {
         res.json({ 
             message: 'Agent started', 
             wallet: address,
-            network: rpcUrl,
+            network: (provider as any).connection?.url || 'unknown',
             contract: contractAddress || 'none (analysis-only mode)'
         });
     } catch (e: any) {
@@ -230,6 +263,20 @@ app.post('/chat', async (req, res) => {
         const wallet = agentService.getWallet();
         if (wallet) {
             walletService.setWallet(wallet);
+        } else {
+            // If wallet not yet initialized, try to initialize it now from env
+            try {
+                const privateKey = process.env.PRIVATE_KEY;
+                if (privateKey) {
+                    const provider = await resolveProvider();
+                    const signer = new ethers.Wallet(privateKey, provider);
+                    walletService.setWallet(signer);
+                    logger.info('Chat endpoint initialized wallet from PRIVATE_KEY');
+                }
+            } catch (initErr: any) {
+                logger.warn('Failed to initialize wallet for chat endpoint:', initErr?.message);
+                // Continue anyway - wallet may be set later or user may not need it
+            }
         }
 
         const response = await walletService.processMessage(message);
