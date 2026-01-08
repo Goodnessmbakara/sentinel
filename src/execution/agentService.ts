@@ -159,18 +159,26 @@ export class AgentService {
         try {
             metrics.inc('analyze.calls');
             
+            // Timeout wrapper for RPC calls
+            const withTimeout = async <T>(p: Promise<T>, ms: number = 10000): Promise<T> => {
+                return Promise.race<T>([
+                    p,
+                    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), ms)) as Promise<T>
+                ]);
+            };
+
             // 1. Ingest Data
-            const marketData = await this.mcpClient.getMarketData(tokenAddress);
+            const marketData = await withTimeout(this.mcpClient.getMarketData(tokenAddress), 15000);
             const tokenInfo = this.tokenDiscovery.getTokenInfo(tokenAddress);
             const tokenSymbol = tokenInfo?.symbol || 'UNKNOWN';
             
-            const sentimentData = await this.sentimentService.getSentimentData(tokenSymbol);
+            const sentimentData = await withTimeout(this.sentimentService.getSentimentData(tokenSymbol), 10000);
 
             // 2. AI-POWERED ANALYSIS (God Analyst replaces hardcoded logic!)
             logger.info('🧠 Consulting God Analyst for comprehensive analysis', { token: tokenSymbol });
             
             const godAnalyst = await import('../analysis/godAnalystService').then(m => new m.GodAnalystService());
-            const analystSignal = await godAnalyst.analyze(tokenAddress, tokenSymbol, marketData, sentimentData);
+            const analystSignal = await withTimeout(godAnalyst.analyze(tokenAddress, tokenSymbol, marketData, sentimentData), 20000);
 
             logger.info('God Analyst decision', { 
                 token: tokenSymbol,
@@ -230,15 +238,15 @@ export class AgentService {
                         const tokenOut = process.env.DEFAULT_QUOTE_TOKEN || '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59';
                         const tokenContract = new EthersNamespace.Contract(tokenIn, ERC20_ABI, this.signer as any);
                         let decimals = 18;
-                        try { decimals = Number(await tokenContract.decimals()); } catch (_) { decimals = 18; }
+                        try { decimals = Number(await withTimeout(tokenContract.decimals(), 5000)); } catch (_) { decimals = 18; }
 
                         const amountIn = EthersNamespace.parseUnits('0.1', decimals);
 
                         const owner = await this.signer.getAddress();
-                        const allowance: bigint = await tokenContract.allowance(owner, routerAddress);
+                        const allowance: bigint = await withTimeout(tokenContract.allowance(owner, routerAddress), 8000);
                         if (allowance < amountIn) {
                             const tx = await tokenContract.approve(routerAddress, amountIn);
-                            await tx.wait?.();
+                            await withTimeout(tx.wait?.(), 15000);
                         }
 
                         const router = new EthersNamespace.Contract(routerAddress, ROUTER_ABI, this.signer as any);
@@ -246,7 +254,7 @@ export class AgentService {
                         const deadline = Math.floor(Date.now() / 1000) + 60 * 5;
                         const minOut = 0;
                         const swapTx = await router.swapExactTokensForTokens(amountIn, minOut, path, owner, deadline);
-                        await swapTx.wait?.();
+                        await withTimeout(swapTx.wait?.(), 30000);
                         logger.info('Fallback on-chain swap attempted');
                     } catch (swapErr) {
                         metrics.inc('errors');
