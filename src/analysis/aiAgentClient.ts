@@ -25,7 +25,7 @@ export class AiAgentClient {
             try {
                 this.genAI = new GoogleGenerativeAI(apiKey);
                 this.model = this.genAI.getGenerativeModel({ 
-                    model: 'gemini-2.0-flash',
+                    model: 'gemini-2.5-flash',
                     generationConfig: {
                         temperature: 0.7,
                         maxOutputTokens: 1024,

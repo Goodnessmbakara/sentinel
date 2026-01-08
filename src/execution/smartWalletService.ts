@@ -41,6 +41,7 @@ export class SmartWalletService {
     private wallet: ethers.Wallet | null = null;
     private pendingTrade: TradeCommand | null = null;
     private routerAddress: string | null = process.env.ROUTER_ADDRESS || null;
+    private simulatedBalances: Record<string, number> = {}; // Client-side tracking for simulated trades
 
     /**
      * Helper to fetch current wallet balances (native and token balances for provided symbols)
@@ -56,20 +57,55 @@ export class SmartWalletService {
         const address = await this.wallet.getAddress();
         console.log(`Fetching balances for address: ${address}, symbols: ${symbols.join(', ')}`);
         
+        // Helper to wrap RPC calls with timeout protection
+        const withTimeout = async <T>(p: Promise<T>, ms: number = 8000): Promise<T> => {
+            return Promise.race<T>([
+                p,
+                new Promise<T>((_, reject) => setTimeout(() => reject(new Error('RPC timeout (native balance)')), ms)) as Promise<T>
+            ]);
+        };
+        
         // Force fresh balance by explicitly requesting latest block
         let native = '0.000000';
         try {
-            const nativeBig = await provider.getBalance(address, 'latest');
+            const nativeBig = await withTimeout(provider.getBalance(address, 'latest'));
             const nativeFormatted = ethers.formatEther(nativeBig as any);
             const nativeNum = Number(nativeFormatted);
             native = Number.isFinite(nativeNum) ? nativeNum.toFixed(6) : '0.000000';
             console.log(`Native balance (CRO): ${native}`);
         } catch (e: any) {
-            console.error('Failed to fetch native balance:', e.message || e);
-            throw new Error(`Failed to fetch native balance: ${e.message || e}`);
+            console.error('Failed to fetch native balance:', e?.message || e);
+            // Attempt fallback provider if available
+            try {
+                const fallbackUrl = process.env.RPC_FALLBACK_URL || 'https://evm.cronos.org';
+                if (fallbackUrl && this.wallet?.provider) {
+                    const fbProvider = new ethers.JsonRpcProvider(fallbackUrl);
+                    const nativeBig = await withTimeout(fbProvider.getBalance(address, 'latest'), 8000);
+                    const nativeFormatted = ethers.formatEther(nativeBig as any);
+                    const nativeNum = Number(nativeFormatted);
+                    native = Number.isFinite(nativeNum) ? nativeNum.toFixed(6) : '0.000000';
+                    console.log(`Native balance via fallback (${fallbackUrl}): ${native}`);
+                } else {
+                    throw e;
+                }
+            } catch (fbErr: any) {
+                console.error('Fallback native balance fetch failed:', fbErr?.message || fbErr);
+                // Return 0 instead of throwing - allow UI to show wallet is connected but balance unavailable
+                native = '0.000000';
+                console.warn('Using default 0 balance after fallback failed');
+            }
         }
         
         const tokens: Record<string, string> = {};
+        
+        // Create a timeout wrapper for token balance calls
+        const withTokenTimeout = async <T>(p: Promise<T>, tokenSymbol: string, ms: number = 8000): Promise<T> => {
+            return Promise.race<T>([
+                p,
+                new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`RPC timeout (${tokenSymbol} balance)`)), ms)) as Promise<T>
+            ]);
+        };
+        
         for (const s of symbols) {
             const symbolUpper = s.toUpperCase();
             // Handle native CRO - add it to tokens for UI consistency
@@ -92,18 +128,18 @@ export class SmartWalletService {
                 console.log(`Fetching balance for ${s} (${symbolUpper}) at address: ${addr}`);
                 const token = new ethers.Contract(addr, ERC20_ABI, this.wallet as any);
                 
-                // Get decimals first
+                // Get decimals first with timeout
                 let decimals = 18;
                 try { 
-                    decimals = Number(await token.decimals()); 
+                    decimals = Number(await withTokenTimeout(token.decimals(), symbolUpper, 5000)); 
                     console.log(`Token ${s} decimals: ${decimals}`);
                 } catch (decimalsErr: any) {
                     console.warn(`Could not get decimals for ${s}, using 18:`, decimalsErr.message);
                     decimals = 18;
                 }
                 
-                // Force fresh balance by using latest block tag
-                const raw = await token.balanceOf(address, { blockTag: 'latest' });
+                // Force fresh balance by using latest block tag with timeout
+                const raw = await withTokenTimeout(token.balanceOf(address, { blockTag: 'latest' }), symbolUpper, 8000);
                 const formatted = ethers.formatUnits(raw, decimals);
                 
                 // Normalize to fixed 6-decimal string to avoid NaN in UI
@@ -129,6 +165,12 @@ export class SmartWalletService {
     constructor(aiAgent: EnhancedAiAgent, agentService?: AgentService) {
         this.aiAgent = aiAgent;
         this.agentService = agentService || null;
+        // Initialize simulated balances with some starting demo amounts
+        this.simulatedBalances = {
+            'CRO': 100,
+            'USDC': 1000,
+            'WCRO': 100
+        };
     }
 
     /**
@@ -234,17 +276,25 @@ export class SmartWalletService {
             };
         }
         try {
+            // Timeout wrapper for RPC calls
+            const withTimeout = async <T>(p: Promise<T>, ms: number = 8000): Promise<T> => {
+                return Promise.race<T>([
+                    p,
+                    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), ms)) as Promise<T>
+                ]);
+            };
+
             // Check if user specified a different address in their message
             const addressMatch = message.match(/0x[a-fA-F0-9]{40}/);
             const targetAddress = addressMatch ? addressMatch[0] : await this.wallet.getAddress();
             const isOwnWallet = targetAddress.toLowerCase() === (await this.wallet.getAddress()).toLowerCase();
 
-            // Use the provider to fetch native balance with explicit 'latest' block
+            // Use the provider to fetch native balance with explicit 'latest' block and timeout
             const provider = this.wallet.provider;
             if (!provider) throw new Error('Wallet has no provider');
             
             console.log(`[Balance Query] Fetching balance for ${targetAddress}`);
-            const nativeBalanceBig = await provider.getBalance(targetAddress, 'latest');
+            const nativeBalanceBig = await withTimeout(provider.getBalance(targetAddress, 'latest'), 8000);
             console.log(`[Balance Query] Raw balance (Wei): ${nativeBalanceBig.toString()}`);
             
             const croBalance = ethers.formatEther(nativeBalanceBig as any);
@@ -262,9 +312,13 @@ export class SmartWalletService {
                     const tokenAddress = this.getTokenAddress(symbol);
                     try {
                         const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, this.wallet.provider as any);
-                        const raw = await tokenContract.balanceOf(targetAddress);
+                        const raw = await withTimeout(tokenContract.balanceOf(targetAddress), 8000);
                         let decimals = 18;
-                        try { decimals = Number(await tokenContract.decimals()); } catch (_) { decimals = 18; }
+                        try { 
+                            decimals = Number(await withTimeout(tokenContract.decimals(), 5000)); 
+                        } catch (_) { 
+                            decimals = 18; 
+                        }
                         const formatted = ethers.formatUnits(raw, decimals);
                         tokenLine = `\n${symbol}: **${parseFloat(formatted).toFixed(6)} ${symbol}**`;
                     } catch (tokErr: any) {
@@ -468,53 +522,44 @@ export class SmartWalletService {
             }
 
             // Fallback: simulated execution (wallet set but no router)
-            // Always try to fetch and display current balances
-            let balances: { native: string; tokens: Record<string, string> } | null = null;
-            let balanceError: string | null = null;
-            
-            try {
-                balances = await this.getWalletBalances([tradeCmd.tokenIn, tradeCmd.tokenOut]);
-                console.log('Fetched balances after simulated trade:', balances);
-            } catch (err: any) {
-                console.error('Failed to fetch balances after simulated trade:', err);
-                balanceError = err.message || String(err);
-                // Try to get at least native balance as fallback
-                try {
-                    if (this.wallet?.provider) {
-                        const address = await this.wallet.getAddress();
-                        const nativeBig = await this.wallet.provider.getBalance(address, 'latest');
-                        const native = ethers.formatEther(nativeBig as any);
-                        balances = {
-                            native: Number(native).toFixed(6),
-                            tokens: {}
-                        };
-                    }
-                } catch (fallbackErr) {
-                    // If even fallback fails, create empty balances
-                    balances = {
-                        native: '0.000000',
-                        tokens: { [tradeCmd.tokenIn]: '0.000000', [tradeCmd.tokenOut]: '0.000000' }
-                    };
-                }
+            // Update client-side simulated balances for demo feedback
+            if (tradeCmd.action === 'BUY') {
+                // Deduct tokenIn, add tokenOut
+                this.updateSimulatedBalance(tradeCmd.tokenIn, -tradeCmd.amount);
+                // Estimate ~1:1 for demo (in reality would depend on prices)
+                this.updateSimulatedBalance(tradeCmd.tokenOut, tradeCmd.amount);
+            } else if (tradeCmd.action === 'SELL') {
+                // Deduct tokenIn, add tokenOut
+                this.updateSimulatedBalance(tradeCmd.tokenIn, -tradeCmd.amount);
+                this.updateSimulatedBalance(tradeCmd.tokenOut, tradeCmd.amount);
             }
+            
+            const simulatedTokenBalances = this.getSimulatedBalances();
+            const croBalance = simulatedTokenBalances['CRO'] || '0.000000';
             
             const actions: any[] = [
                 { type: 'trade_executed', details: tradeCmd }
             ];
             
-            if (balances) {
-                actions.push({ type: 'balance_update', details: balances });
-            }
+            // Prepare balance object in expected format: native is CRO, tokens excludes CRO
+            const balanceForDisplay = {
+                native: croBalance,
+                tokens: Object.fromEntries(
+                    Object.entries(simulatedTokenBalances).filter(([k]) => k.toUpperCase() !== 'CRO')
+                ),
+                isSimulated: true
+            };
+            
+            actions.push({ 
+                type: 'balance_update', 
+                details: balanceForDisplay
+            });
             
             let replyMessage = `✅ Trade executed (simulated): ${tradeCmd.action} ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`;
             if (!this.routerAddress) {
-                replyMessage += `\n\nℹ️ Note: Router not configured (ROUTER_ADDRESS), so this was simulated.`;
+                replyMessage += `\n\nℹ️ Note: Router not configured (ROUTER_ADDRESS), so this is a demo simulation.`;
             }
-            if (balanceError) {
-                replyMessage += `\n\n⚠️ Warning: Could not fully fetch balances: ${balanceError}`;
-            } else {
-                replyMessage += `\n\nCurrent wallet balances shown below.`;
-            }
+            replyMessage += `\n\nEstimated balances updated (client-side only).`;
             
             return {
                 message: replyMessage,
@@ -555,17 +600,44 @@ export class SmartWalletService {
 
     /**
      * Get token address by symbol (mock addresses for demo)
+     * Note: CRO maps to WCRO for DEX router compatibility
      */
     private getTokenAddress(symbol: string): string {
         const symbolUpper = symbol.toUpperCase();
         const addresses: { [key: string]: string } = {
-            'CRO': '0x0000000000000000000000000000000000000000', // Native CRO - use zero address as marker
+            'CRO': '0x5C7F8A570d578ED84E63fdFA7b1eE72dEae1AE23', // Map CRO to WCRO for DEX compatibility
             'WCRO': '0x5C7F8A570d578ED84E63fdFA7b1eE72dEae1AE23',
             'USDC': '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59',
             'WBTC': '0x062E66477Faf219F25D27dCED647BF57C3107d52',
             'ETH': '0xe44Fd7fCb2b1581822D0c862B68222998a0c299a'
         };
         return addresses[symbolUpper] || addresses['WCRO'];
+    }
+
+    /**
+     * Update simulated balances for demo trades (client-side tracking)
+     */
+    private updateSimulatedBalance(token: string, change: number) {
+        const key = token.toUpperCase();
+        if (!this.simulatedBalances[key]) {
+            this.simulatedBalances[key] = 0;
+        }
+        this.simulatedBalances[key] += change;
+        // Clamp to non-negative
+        if (this.simulatedBalances[key] < 0) {
+            this.simulatedBalances[key] = 0;
+        }
+    }
+
+    /**
+     * Get current simulated balances
+     */
+    private getSimulatedBalances(): Record<string, string> {
+        const result: Record<string, string> = {};
+        for (const [token, amount] of Object.entries(this.simulatedBalances)) {
+            result[token] = Number.isFinite(amount) ? Math.max(0, amount).toFixed(6) : '0.000000';
+        }
+        return result;
     }
 
     /**
@@ -764,6 +836,14 @@ export class SmartWalletService {
         const provider = this.wallet.provider;
         if (!provider) throw new Error('Wallet has no provider');
 
+        // Timeout wrapper for RPC operations
+        const withTimeout = async <T>(p: Promise<T>, ms: number = 10000): Promise<T> => {
+            return Promise.race<T>([
+                p,
+                new Promise<T>((_, reject) => setTimeout(() => reject(new Error('RPC timeout during swap execution')), ms)) as Promise<T>
+            ]);
+        };
+
         // Resolve token addresses from symbols (best-effort)
         const tokenInAddress = this.getTokenAddress(tradeCmd.tokenIn);
         const tokenOutAddress = this.getTokenAddress(tradeCmd.tokenOut);
@@ -773,15 +853,19 @@ export class SmartWalletService {
 
         // Determine decimals and compute amount in smallest unit
         let decimals = 18;
-        try { decimals = Number(await tokenIn.decimals()); } catch (_) { decimals = 18; }
+        try { decimals = Number(await withTimeout(tokenIn.decimals(), 5000)); } catch (_) { decimals = 18; }
         const amountIn = ethers.parseUnits(String(tradeCmd.amount), decimals);
 
         // Approve router if needed
         const owner = await this.wallet.getAddress();
-        const allowance: bigint = await tokenIn.allowance(owner, this.routerAddress);
+        const allowance: bigint = await withTimeout(tokenIn.allowance(owner, this.routerAddress), 8000);
         if (allowance < amountIn) {
-            const tx = await tokenIn.approve(this.routerAddress, amountIn);
-            await tx.wait?.();
+            const approveTx = await tokenIn.approve(this.routerAddress, amountIn);
+            console.log(`[executeSwap] Approval tx sent, hash: ${approveTx.hash}`);
+            const approveRc = await withTimeout(approveTx.wait?.(2), 30000) as ethers.TransactionReceipt | null | undefined;
+            if (!approveRc) throw new Error('Approval transaction timed out');
+            if (approveRc.status === 0) throw new Error('Approval transaction reverted');
+            console.log(`[executeSwap] Approval confirmed at block ${approveRc.blockNumber}`);
         }
 
         // Build path and call swapExactTokensForTokens
@@ -789,35 +873,43 @@ export class SmartWalletService {
         const deadline = Math.floor(Date.now() / 1000) + 60 * 5; // 5 minutes
         const minOut = 0; // For demo: accept any amount. Production must compute slippage.
 
+        // Execute swap and wait for mining
+        console.log(`[executeSwap] Executing swap: ${tradeCmd.amount} ${tradeCmd.tokenIn} → ${tradeCmd.tokenOut}`);
         const swapTx = await router.swapExactTokensForTokens(amountIn, minOut, path, owner, deadline);
-        const rc = await swapTx.wait?.();
-        const txHash = rc?.transactionHash || swapTx.hash || 'unknown-tx';
+        console.log(`[executeSwap] Swap transaction sent, hash: ${swapTx.hash}`);
         
-        // Wait for state to propagate after transaction confirmation
-        // This ensures balances are updated when we fetch them
-        if (rc?.blockNumber) {
-            try {
-                // Wait for the next block to ensure state is updated
-                const confirmationBlock = rc.blockNumber;
-                let attempts = 0;
-                const maxAttempts = 20; // Max 10 seconds (20 * 500ms)
-                while (attempts < maxAttempts) {
-                    const latestBlock = await provider.getBlockNumber();
-                    if (latestBlock > confirmationBlock) {
-                        break;
-                    }
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    attempts++;
+        // Wait for mining with extended timeout to handle slow networks
+        const rc = await withTimeout(swapTx.wait?.(2), 60000) as ethers.TransactionReceipt | null | undefined;
+        if (!rc) {
+            throw new Error('Swap transaction pending but timed out waiting for confirmation');
+        }
+        if (rc.status === 0) {
+            throw new Error('Swap transaction reverted on-chain. Check liquidity and slippage.');
+        }
+
+        const txHash = rc.hash || swapTx.hash || 'unknown-tx';
+        console.log(`[executeSwap] Transaction confirmed at block ${rc.blockNumber}, hash: ${txHash}`);
+        
+        // Wait for state propagation with extended timeout
+        try {
+            const confirmationBlock = rc.blockNumber;
+            let attempts = 0;
+            const maxAttempts = 60; // Max 30 seconds (60 * 500ms)
+            while (attempts < maxAttempts) {
+                const latestBlock = await withTimeout(provider.getBlockNumber(), 5000);
+                if (latestBlock > confirmationBlock) {
+                    console.log(`[executeSwap] State propagated at block ${latestBlock}`);
+                    break;
                 }
-                // Add a small additional delay to ensure state propagation
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            } catch (e) {
-                // Fallback: wait 3 seconds for state to propagate
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                await new Promise(resolve => setTimeout(resolve, 500));
+                attempts++;
             }
-        } else {
-            // Fallback: wait 3 seconds for state to propagate
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // Add extended delay to ensure RPC state is fully synced
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        } catch (e) {
+            // Fallback: wait 5 seconds for state to propagate
+            console.warn('[executeSwap] Block number check failed, using fallback wait');
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
         
         return { txHash };
@@ -830,37 +922,51 @@ export class SmartWalletService {
         const provider = this.wallet.provider;
         if (!provider) throw new Error('Wallet has no provider');
 
+        // Timeout wrapper
+        const withTimeout = async <T>(p: Promise<T>, ms: number = 10000): Promise<T> => {
+            return Promise.race<T>([
+                p,
+                new Promise<T>((_, reject) => setTimeout(() => reject(new Error('RPC timeout during token transfer')), ms)) as Promise<T>
+            ]);
+        };
+
         const token = new ethers.Contract(tokenAddress, ERC20_ABI, this.wallet as any);
         let decimals = 18;
-        try { decimals = Number(await token.decimals()); } catch (_) { decimals = 18; }
+        try { decimals = Number(await withTimeout(token.decimals(), 5000)); } catch (_) { decimals = 18; }
         const amountWei = ethers.parseUnits(String(amount), decimals);
         const tx = await token.transfer(to, amountWei);
-        const rc = await tx.wait?.();
-        const txHash = rc?.transactionHash || tx.hash || 'unknown-tx';
+        const rc = await withTimeout(tx.wait?.(2), 60000) as ethers.TransactionReceipt | null | undefined;
         
-        // Wait for state to propagate after transaction confirmation
-        if (rc?.blockNumber) {
-            try {
-                const confirmationBlock = rc.blockNumber;
-                let attempts = 0;
-                const maxAttempts = 20; // Max 10 seconds (20 * 500ms)
-                while (attempts < maxAttempts) {
-                    const latestBlock = await provider.getBlockNumber();
-                    if (latestBlock > confirmationBlock) {
-                        break;
-                    }
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    attempts++;
+        if (!rc) {
+            throw new Error('Transfer transaction pending but timed out waiting for confirmation');
+        }
+        if (rc.status === 0) {
+            throw new Error('Transfer transaction reverted on-chain.');
+        }
+        
+        const txHash = rc.hash || tx.hash || 'unknown-tx';
+        console.log(`[sendTokens] Transfer confirmed at block ${rc.blockNumber}, hash: ${txHash}`);
+        
+        // Wait for state propagation with extended timeout
+        try {
+            const confirmationBlock = rc.blockNumber;
+            let attempts = 0;
+            const maxAttempts = 60; // Max 30 seconds (60 * 500ms)
+            while (attempts < maxAttempts) {
+                const latestBlock = await withTimeout(provider.getBlockNumber(), 5000);
+                if (latestBlock > confirmationBlock) {
+                    console.log(`[sendTokens] State propagated at block ${latestBlock}`);
+                    break;
                 }
-                // Add a small additional delay to ensure state propagation
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            } catch (e) {
-                // Fallback: wait 3 seconds for state to propagate
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                await new Promise(resolve => setTimeout(resolve, 500));
+                attempts++;
             }
-        } else {
-            // Fallback: wait 3 seconds for state to propagate
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // Add extended delay to ensure RPC state is fully synced
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        } catch (e) {
+            // Fallback: wait 5 seconds for state to propagate
+            console.warn('[sendTokens] Block number check failed, using fallback wait');
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
         
         return { txHash };

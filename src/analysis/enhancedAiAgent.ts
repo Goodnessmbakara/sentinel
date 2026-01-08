@@ -60,7 +60,7 @@ export class EnhancedAiAgent {
                 this.genAI = new GoogleGenerativeAI(apiKey);
                 // Use gemini-2.0-flash (stable and widely available)
                 this.model = this.genAI.getGenerativeModel({ 
-                    model: 'gemini-2.0-flash',
+                    model: 'gemini-2.5-flash',
                     generationConfig: {
                         temperature: 0.3,
                         topP: 0.9,
@@ -177,8 +177,12 @@ When you detect a resolved blocker, immediately:
                     };
                     resolve(resp);
                 } else {
-                    // Unknown error: propagate so caller can decide
-                    reject(err);
+                    // Unknown error: return friendly error instead of throwing so callers can handle gracefully
+                    const resp: ChatResponse = {
+                        message: `Error: Gemini request failed (${errMsg}). Verify network, API key (LLM_API_KEY), and model availability.`,
+                        status: 'Error'
+                    };
+                    resolve(resp);
                 }
             }
         }
