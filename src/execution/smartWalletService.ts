@@ -234,18 +234,83 @@ export class SmartWalletService {
             };
         }
         try {
-            // Check if user specified a different address in their message
-            const addressMatch = message.match(/0x[a-fA-F0-9]{40}/);
-            const targetAddress = addressMatch ? addressMatch[0] : await this.wallet.getAddress();
+            // First, check if user is trying to provide an address (any 0x hex string)
+            const anyHexMatch = message.match(/0x[a-fA-F0-9]+/);
+            let targetAddress: string;
+            
+            if (anyHexMatch) {
+                const hexString = anyHexMatch[0];
+                
+                // Check if it's the right length for an Ethereum address
+                if (hexString.length !== 42) {
+                    return {
+                        message: '⚠️ **Invalid Address Length**\n\n' +
+                                 `You provided: \`${hexString}\`\n` +
+                                 `Length: ${hexString.length} characters\n\n` +
+                                 (hexString.length === 66 ? 
+                                     '**This looks like a transaction hash** (66 characters)\n\n' :
+                                     '**Ethereum addresses must be exactly 42 characters** (0x + 40 hex digits)\n\n') +
+                                 'Please provide a valid Ethereum address to check its balance.',
+                        status: 'Error'
+                    };
+                }
+                
+                // It's 42 characters, normalize to checksum format
+                // First convert to lowercase to handle invalid checksums
+                try {
+                    targetAddress = ethers.getAddress(hexString.toLowerCase());
+                } catch (checksumErr) {
+                    return {
+                        message: '⚠️ **Invalid Address Format**\n\n' +
+                                 `The address you provided appears to be invalid.\n\n` +
+                                 `You provided: \`${hexString}\`\n\n` +
+                                 'Please double-check the address and try again.',
+                        status: 'Error'
+                    };
+                }
+
+            } else {
+                // No address provided, use their own wallet
+                targetAddress = await this.wallet.getAddress();
+            }
+            
             const isOwnWallet = targetAddress.toLowerCase() === (await this.wallet.getAddress()).toLowerCase();
 
             // Use the provider to fetch native balance with explicit 'latest' block
             const provider = this.wallet.provider;
             if (!provider) throw new Error('Wallet has no provider');
             
+            
             console.log(`[Balance Query] Fetching balance for ${targetAddress}`);
-            const nativeBalanceBig = await provider.getBalance(targetAddress, 'latest');
-            console.log(`[Balance Query] Raw balance (Wei): ${nativeBalanceBig.toString()}`);
+            
+            // Try RPC first
+            let nativeBalanceBig = await provider.getBalance(targetAddress, 'latest');
+            console.log(`[Balance Query] RPC Raw balance (Wei): ${nativeBalanceBig.toString()}`);
+            
+            // If RPC returns zero, try Cronos Explorer API as fallback
+            if (nativeBalanceBig.toString() === '0' || nativeBalanceBig.toString() === '0x0') {
+                console.log('[Balance Query] RPC returned zero, trying Cronos Explorer API fallback...');
+                try {
+                    const axios = require('axios');
+                    
+                    // Use Cronos Explorer API (BlockScout-based)
+                    const explorerUrl = `https://cronos.org/explorer/api?module=account&action=eth_get_balance&address=${targetAddress}`;
+                    const response = await axios.get(explorerUrl, { timeout: 5000 });
+                    
+                    console.log('[Balance Query] Explorer API response:', JSON.stringify(response.data));
+                    
+                    if (response.data && response.data.result) {
+                        // BlockScout API returns balance in Wei as hex string
+                        nativeBalanceBig = BigInt(response.data.result);
+                        console.log(`[Balance Query] Explorer API balance (Wei): ${nativeBalanceBig.toString()}`);
+                    } else {
+                        console.warn('[Balance Query] Explorer API returned no result:', response.data);
+                    }
+                } catch (explorerErr: any) {
+                    console.warn('[Balance Query] Explorer API also failed:', explorerErr.message);
+                    // Continue with RPC result (zero)
+                }
+            }
             
             const croBalance = ethers.formatEther(nativeBalanceBig as any);
             console.log(`[Balance Query] Formatted balance (CRO): ${croBalance}`);

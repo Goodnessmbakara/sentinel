@@ -144,18 +144,57 @@ export class SentimentService {
 
     /**
      * Fallback mock sentiment generation
+     * Generates deterministic sentiment based on token characteristics
      */
     private generateMockSentiment(tokenSymbol: string): SentimentData {
-        const sentiments: ('POSITIVE' | 'NEUTRAL' | 'NEGATIVE')[] = ['POSITIVE', 'NEUTRAL', 'NEGATIVE'];
-        const randomSentiment = sentiments[Math.floor(Math.random() * sentiments.length)];
+        const symbolUpper = tokenSymbol.toUpperCase();
+        
+        // Generate deterministic sentiment based on token type
+        let sentiment: 'POSITIVE' | 'NEUTRAL' | 'NEGATIVE' = 'NEUTRAL';
+        let mentions = 50;
+        let smartMoneyMentions = 0;
+        
+        // Stablecoins: low mentions, neutral sentiment
+        if (['USDC', 'USDT', 'DAI', 'BUSD'].includes(symbolUpper)) {
+            sentiment = 'NEUTRAL';
+            mentions = Math.floor(Math.random() * 100) + 20;
+            smartMoneyMentions = 0;
+        }
+        // Major tokens: moderate to high mentions, variable sentiment
+        else if (['CRO', 'WCRO', 'ETH', 'WETH', 'BTC', 'WBTC'].includes(symbolUpper)) {
+            sentiment = 'POSITIVE';
+            mentions = Math.floor(Math.random() * 500) + 200;
+            smartMoneyMentions = Math.floor(Math.random() * 3); // 0-2
+        }
+        // Other tokens: variable sentiment based on hash
+        else {
+            const hash = this.hashString(symbolUpper);
+            const sentiments: ('POSITIVE' | 'NEUTRAL' | 'NEGATIVE')[] = ['POSITIVE', 'NEUTRAL', 'NEGATIVE'];
+            sentiment = sentiments[hash % 3];
+            mentions = 50 + (hash % 200);
+            smartMoneyMentions = hash % 4; // 0-3
+        }
         
         return {
             tokenSymbol: tokenSymbol,
-            mentions: Math.floor(Math.random() * 1000),
-            sentiment: randomSentiment,
-            sources: ['Mock Data'],
-            smartMoneyMentions: Math.floor(Math.random() * 50),
+            mentions,
+            sentiment,
+            sources: ['Mock Data - API Unavailable'],
+            smartMoneyMentions,
             timestamp: Date.now()
         };
+    }
+    
+    /**
+     * Simple string hash for deterministic mock data
+     */
+    private hashString(str: string): number {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            const char = str.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash; // Convert to 32-bit integer
+        }
+        return Math.abs(hash);
     }
 }
