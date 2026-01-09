@@ -20,7 +20,7 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize Components
-const mcpClient = new McpClient(process.env.MCP_ENDPOINT || 'http://localhost:8080'); // Mock default
+const mcpClient = new McpClient(); // Uses CoinGecko + On-chain DEX data
 const sentimentService = new SentimentService();
 const aiClient = new AiAgentClient(); // Used inside HypeFilter?
 // Wait, hypeFilter needs aiClient.

@@ -1,13 +1,23 @@
 import axios from 'axios';
+import { ethers } from 'ethers';
 import { MarketData } from '../models/types';
 import { validateMarketData } from '../models/validation';
+import { logger } from '../utils/logger';
 
 // Requirements: 5.1, 5.2, 5.3, 5.4
 
-// Mock MCP Server URL (replace with actual if available or use env)
-// Mock MCP Server URL (replace with actual if available or use env)
-const MCP_SERVER_URL = process.env.MCP_ENDPOINT || 'http://localhost:3000/mcp';
-const ALLOW_MOCK_ON_FAIL = (process.env.MCP_ALLOW_MOCK || 'false').toLowerCase() !== 'false';
+// Market data sources
+const COINGECKO_API = 'https://api.coingecko.com/api/v3';
+const ALLOW_MOCK_ON_FAIL = (process.env.MCP_ALLOW_MOCK || 'true').toLowerCase() !== 'false';
+
+// VVS Router for on-chain price quotes (Uniswap V2 fork)
+const VVS_ROUTER_ADDRESS = process.env.ROUTER_ADDRESS || '0x145863Eb42Cf62847A6Ca784e6416C1682b1b2Ae';
+const USDC_ADDRESS = process.env.DEFAULT_QUOTE_TOKEN || '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59';
+
+// Uniswap V2 Router ABI (minimal - just getAmountsOut)
+const ROUTER_ABI = [
+    'function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory amounts)'
+];
 
 interface MarketDataCache {
     [tokenAddress: string]: {
@@ -16,7 +26,7 @@ interface MarketDataCache {
     }
 }
 
-const CACHE_TTL = 10000; // 10 seconds
+const CACHE_TTL = 30000; // 30 seconds - longer for API rate limits
 
 export class McpClient {
     private cache: MarketDataCache = {};
@@ -25,12 +35,22 @@ export class McpClient {
     private lastFailureTime = 0;
     private readonly FAILURE_THRESHOLD = 5;
     private readonly RESET_TIMEOUT = 60000; // 1 minute
+    private provider: ethers.JsonRpcProvider | null = null;
 
-    constructor(private baseUrl: string = MCP_SERVER_URL) {}
+    constructor(baseUrl?: string) {
+        // Initialize provider for on-chain queries
+        const rpcUrl = process.env.RPC_URL || 'https://evm.cronos.org';
+        try {
+            this.provider = new ethers.JsonRpcProvider(rpcUrl);
+            logger.info('Market data client initialized', { sources: ['CoinGecko', 'On-Chain DEX'] });
+        } catch (error: any) {
+            logger.warn('Failed to initialize RPC provider for on-chain quotes', { error: error.message });
+        }
+    }
 
     /**
      * Fetch market data for a given token address.
-     * Implements caching and circuit breaker pattern.
+     * Tries multiple sources with smart fallback.
      */
     async getMarketData(tokenAddress: string): Promise<MarketData> {
         this.checkCircuitBreaker();
@@ -41,56 +61,147 @@ export class McpClient {
             return cached.data;
         }
 
+        // Try CoinGecko first
         try {
-            // In a real scenario, this would call the MCP server.
-            // For now, if no URL is truly set up, we might fail or mock.
-            // Let's assume we maintain the structure for the real call.
-            const response = await axios.get(`${this.baseUrl}/market/${tokenAddress}`, {
-                timeout: 5000 // 5s timeout
+            const data = await this.fetchFromCoinGecko(tokenAddress);
+            if (data) {
+                this.cacheAndReturn(tokenAddress, data);
+                this.recordSuccess();
+                return data;
+            }
+        } catch (error: any) {
+            logger.debug('CoinGecko fetch failed, trying on-chain', { error: error.message });
+        }
+
+        // Fallback to on-chain DEX quote
+        try {
+            const data = await this.fetchFromDex(tokenAddress);
+            if (data) {
+                this.cacheAndReturn(tokenAddress, data);
+                this.recordSuccess();
+                return data;
+            }
+        } catch (error: any) {
+            logger.debug('On-chain fetch failed', { error: error.message });
+        }
+
+        // Final fallback to mock data
+        this.recordFailure();
+        if (ALLOW_MOCK_ON_FAIL) {
+            logger.warn('All market data sources failed, using mock data', { tokenAddress });
+            const mock = this.generateMockMarketData(tokenAddress);
+            this.cacheAndReturn(tokenAddress, mock);
+            return mock;
+        }
+
+        throw new Error(`Unable to fetch market data for ${tokenAddress}`);
+    }
+
+    /**
+     * Fetch price from CoinGecko API (free tier)
+     */
+    private async fetchFromCoinGecko(tokenAddress: string): Promise<MarketData | null> {
+        try {
+            const url = `${COINGECKO_API}/simple/token_price/cronos`;
+            const response = await axios.get(url, {
+                params: {
+                    contract_addresses: tokenAddress.toLowerCase(),
+                    vs_currencies: 'usd',
+                    include_24hr_vol: true,
+                    include_24hr_change: true
+                },
+                timeout: 5000
             });
 
-            const data: MarketData = response.data;
-
-            // Validate data (Requirement 5.4)
-            if (!validateMarketData(data)) {
-                console.error(`Invalid market data received for ${tokenAddress}`);
-                throw new Error('Invalid market data');
+            const tokenData = response.data[tokenAddress.toLowerCase()];
+            if (!tokenData || !tokenData.usd) {
+                return null;
             }
 
-            // Update cache
-            this.cache[tokenAddress] = {
-                data,
+            // Determine volume trend from 24h change
+            let volumeTrend: MarketData['volumeTrend'] = 'FLAT';
+            if (tokenData.usd_24h_change > 10) volumeTrend = 'RISING';
+            else if (tokenData.usd_24h_change < -10) volumeTrend = 'FALLING';
+
+            const marketData: MarketData = {
+                tokenAddress,
+                price: tokenData.usd,
+                volume24h: tokenData.usd_24h_vol || 0,
+                volumeTrend,
                 timestamp: Date.now()
             };
-            
-            this.recordSuccess();
-            return data;
 
-        } catch (error) {
-            this.recordFailure();
-            console.error(`Failed to fetch market data for ${tokenAddress}:`, error);
-
-            if (ALLOW_MOCK_ON_FAIL) {
-                const mock = this.generateMockMarketData(tokenAddress);
-                // Update cache to avoid hammering MCP immediately
-                this.cache[tokenAddress] = { data: mock, timestamp: Date.now() };
-                this.recordSuccess();
-                return mock;
+            if (validateMarketData(marketData)) {
+                logger.debug('CoinGecko data fetched successfully', { tokenAddress, price: marketData.price });
+                return marketData;
             }
 
+            return null;
+
+        } catch (error: any) {
+            if (error.response?.status === 429) {
+                logger.warn('CoinGecko rate limit hit');
+            }
             throw error;
         }
     }
 
+    /**
+     * Fetch price from on-chain DEX (VVS Finance)
+     */
+    private async fetchFromDex(tokenAddress: string): Promise<MarketData | null> {
+        if (!this.provider) {
+            throw new Error('RPC provider not available');
+        }
+
+        try {
+            const router = new ethers.Contract(VVS_ROUTER_ADDRESS, ROUTER_ABI, this.provider);
+            
+            // Get price by swapping 1 token for USDC
+            const amountIn = ethers.parseUnits('1', 18); // Assume 18 decimals
+            const path = [tokenAddress, USDC_ADDRESS];
+            
+            const amounts = await router.getAmountsOut(amountIn, path);
+            const priceInUsdc = parseFloat(ethers.formatUnits(amounts[1], 6)); // USDC has 6 decimals
+
+            // We can't get volume from on-chain easily, so estimate
+            const marketData: MarketData = {
+                tokenAddress,
+                price: priceInUsdc,
+                volume24h: 0, // Not available on-chain
+                volumeTrend: 'FLAT', // Not available on-chain
+                timestamp: Date.now()
+            };
+
+            if (validateMarketData(marketData)) {
+                logger.debug('On-chain DEX data fetched successfully', { tokenAddress, price: marketData.price });
+                return marketData;
+            }
+
+            return null;
+
+        } catch (error: any) {
+            // Token might not have liquidity pair
+            throw error;
+        }
+    }
+
+    private cacheAndReturn(tokenAddress: string, data: MarketData): void {
+        this.cache[tokenAddress] = {
+            data,
+            timestamp: Date.now()
+        };
+    }
+
     // Circuit Breaker Logic
     private checkCircuitBreaker() {
-        if (ALLOW_MOCK_ON_FAIL) return; // do not trip breaker when we allow mock fallback
+        if (ALLOW_MOCK_ON_FAIL) return;
         if (this.circuitOpen) {
             if (Date.now() - this.lastFailureTime > this.RESET_TIMEOUT) {
-                this.circuitOpen = false; // Half-open/Reset
+                this.circuitOpen = false;
                 this.failureCount = 0;
             } else {
-                throw new Error('MCP Circuit Breaker is OPEN');
+                throw new Error('Market data circuit breaker is OPEN');
             }
         }
     }
@@ -100,20 +211,24 @@ export class McpClient {
         this.lastFailureTime = Date.now();
         if (this.failureCount >= this.FAILURE_THRESHOLD) {
             this.circuitOpen = true;
+            logger.warn('Market data circuit breaker opened');
         }
     }
 
     private recordSuccess() {
+        if (this.failureCount > 0) {
+            logger.info('Market data circuit breaker reset');
+        }
         this.failureCount = 0;
         this.circuitOpen = false;
     }
 
     private generateMockMarketData(tokenAddress: string): MarketData {
-        // Simple mock to keep pipeline alive; deterministic-ish based on address hash
         const base = Math.abs(this.hashAddress(tokenAddress)) % 1000;
-        const price = 0.1 + (base / 1000) * 10; // 0.1 .. 10
-        const volume = 1000 + (base * 10);
+        const price = 0.01 + (base / 1000) * 5; // $0.01 - $5.00
+        const volume = 10000 + (base * 100);
         const volumeTrend: MarketData['volumeTrend'] = ['RISING', 'FLAT', 'FALLING'][base % 3] as any;
+        
         return {
             tokenAddress,
             price,
