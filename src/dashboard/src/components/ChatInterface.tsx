@@ -160,21 +160,50 @@ export function ChatInterface() {
 
     return (
         <div className="glass-card chat-container">
-            <div className="chat-header">
-                <h2>💬 Smart Wallet Chat</h2>
-                <button className="btn-clear" onClick={clearChat}>Clear</button>
-            </div>
+            <button className="btn-clear" onClick={clearChat} style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 10 }}>Clear</button>
 
             <div className="chat-messages">
                 {messages.length === 0 && (
-                    <div className="chat-empty">
-                        <p>👋 Hi! I'm your AI trading assistant.</p>
-                        <p>Try asking:</p>
-                        <ul>
-                            <li>"What's my balance?"</li>
-                            <li>"Analyze WCRO market"</li>
-                            <li>"Buy 10 CRO of USDC"</li>
-                        </ul>
+                    <div style={{ 
+                        display: 'flex', 
+                        flexDirection: 'column', 
+                        gap: '0.75rem', 
+                        padding: '2rem 1rem',
+                        alignItems: 'center' 
+                    }}>
+                        <p style={{ color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>Try asking:</p>
+                        {[
+                            "What's my balance?",
+                            "Analyze WCRO market",
+                            "Buy 10 CRO of USDC"
+                        ].map((question, i) => (
+                            <button
+                                key={i}
+                                onClick={() => setInput(question)}
+                                style={{
+                                    padding: '0.75rem 1.5rem',
+                                    background: 'rgba(255, 255, 255, 0.05)',
+                                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                                    borderRadius: '8px',
+                                    color: 'var(--text-primary)',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s',
+                                    fontSize: '0.9rem',
+                                    width: '100%',
+                                    maxWidth: '400px'
+                                }}
+                                onMouseEnter={(e) => {
+                                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
+                                    e.currentTarget.style.borderColor = 'var(--accent)';
+                                }}
+                                onMouseLeave={(e) => {
+                                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+                                    e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+                                }}
+                            >
+                                {question}
+                            </button>
+                        ))}
                     </div>
                 )}
                 
