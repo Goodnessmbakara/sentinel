@@ -42,6 +42,15 @@ describe("Agent Contract - Comprehensive Tests", function () {
 
         // Register session key
         await agent.registerSessionKey(sessionKey.address, 86400); // 24 hours
+        
+        // Set risk profile with appropriate max position size
+        await agent.setRiskProfile(
+            0, // GUARDIAN mode
+            90,
+            -2,
+            ethers.parseEther("1000"), // Max position: 1000 tokens
+            [await tokenOut.getAddress()]
+        );
     });
 
     describe("1. Cost Basis Tracking", function () {
