@@ -89,32 +89,18 @@ export class X402Service {
 
     /**
      * Execute trade via x402 facilitator
-     * Falls back gracefully if x402 fails
+     * NO FALLBACK - Fails loudly if x402 doesn't work
      */
-    async executeTrade(instruction: any, fallback: () => Promise<any>): Promise<any> {
+    async executeTrade(instruction: any): Promise<any> {
         if (!this.isEnabled()) {
-            logger.info('x402 disabled - executing fallback');
-            return fallback();
+            throw new Error('CRITICAL: x402 is not enabled. Cannot execute trade via payment instruction. Set USE_X402=true or use direct swap path.');
         }
 
-        try {
-            logger.info('Attempting x402 facilitated trade execution');
-            
-            // TODO: Implement actual facilitator execution
-            // For now, this is a proof-of-concept that demonstrates the pattern
-            // Full implementation would involve:
-            // 1. Create EIP-3009 authorization
-            // 2. Submit to facilitator
-            // 3. Wait for settlement
-            // 4. Execute swap
-            
-            logger.warn('x402 execution not yet fully implemented - using fallback');
-            return fallback();
-
-        } catch (error: any) {
-            logger.error('x402 execution failed - falling back to direct swap', { error: error.message });
-            return fallback();
-        }
+        logger.info('Attempting x402 facilitated trade execution');
+        
+        // TODO: Implement actual facilitator execution
+        // For now this throws to expose that x402 is NOT fully implemented
+        throw new Error('x402 facilitator execution NOT YET IMPLEMENTED. Full implementation requires: 1) EIP-3009 authorization, 2) Facilitator submission, 3) Settlement handling. This error exposes the gap.');
     }
 }
 

@@ -87,14 +87,15 @@ export class McpClient {
 
         // Final fallback to mock data
         this.recordFailure();
-        if (ALLOW_MOCK_ON_FAIL) {
-            logger.warn('All market data sources failed, using mock data', { tokenAddress });
-            const mock = this.generateMockMarketData(tokenAddress);
-            this.cacheAndReturn(tokenAddress, mock);
-            return mock;
-        }
-
-        throw new Error(`Unable to fetch market data for ${tokenAddress}`);
+        
+        // NO MORE MOCK DATA - Fail loudly to expose real issues
+        logger.error('ALL market data sources failed - no mock fallback', { 
+            tokenAddress,
+            triedSources: ['CoinGecko', 'On-chain DEX'],
+            suggestion: 'Check API connectivity and RPC endpoint'
+        });
+        
+        throw new Error(`CRITICAL: Unable to fetch market data for ${tokenAddress} from any source (CoinGecko, DEX). System requires working data source.`);
     }
 
     /**
