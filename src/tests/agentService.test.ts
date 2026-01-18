@@ -38,7 +38,8 @@ describe('AgentService Integration', () => {
         allowedTokens: [],
         minConfidenceScore: 70,
         stopLossPercent: -15,
-        maxPositionSize: 1000
+        maxPositionSize: 1000,
+        slippageTolerance: 2
     };
 
     beforeEach(() => {

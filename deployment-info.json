@@ -1,0 +1,10 @@
+{
+  "network": "cronos_testnet",
+  "chainId": 338,
+  "contractAddress": "0x7CCD52ACcB065c63D7Df21d57ECD97CB4A157374",
+  "deployer": "0x40a2Aa83271dd2F86e7C50C05b60bf3873bA4461",
+  "router": "0x145863Eb42Cf62847A6Ca784e6416C1682b1b2Ae",
+  "agentWallet": "0x40a2Aa83271dd2F86e7C50C05b60bf3873bA4461",
+  "timestamp": "2026-01-18T18:47:29.240Z",
+  "blockNumber": 68329835
+}

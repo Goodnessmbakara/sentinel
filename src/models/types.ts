@@ -78,6 +78,7 @@ export interface UserRiskProfile {
   minConfidenceScore: number;
   stopLossPercent: number;
   maxPositionSize: number;
+  slippageTolerance: number; // Percentage (e.g., 1 = 1% slippage)
 }
 
 // Default Constants
@@ -86,7 +87,8 @@ export const GUARDIAN_PROFILE: UserRiskProfile = {
   allowedTokens: ['0x5C7F8A570d578ED84E63fdFA7b1eE72dEae1AE23', '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59', '0x062E66477Faf219F25D27dCED647BF57C3107d52'], // WCRO, USDC, WBTC (Example addresses)
   minConfidenceScore: 90,
   stopLossPercent: -2,
-  maxPositionSize: 1000 // Example cap
+  maxPositionSize: 1000, // Example cap
+  slippageTolerance: 0.5 // Conservative 0.5% slippage
 };
 
 export const HUNTER_PROFILE: UserRiskProfile = {
@@ -94,7 +96,8 @@ export const HUNTER_PROFILE: UserRiskProfile = {
   allowedTokens: [], // All allowed
   minConfidenceScore: 50, // Looser filter
   stopLossPercent: -15,
-  maxPositionSize: 500 // Smaller size for higher risk
+  maxPositionSize: 500, // Smaller size for higher risk
+  slippageTolerance: 2 // Aggressive 2% slippage tolerance
 };
 
 export interface AgentConfiguration {

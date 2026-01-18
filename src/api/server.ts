@@ -111,12 +111,25 @@ app.get('/logs/recent', (req, res) => {
 });
 
 app.post('/start', async (req, res) => {
-    // Use env vars as defaults if not provided in request
-    const privateKey = req.body.privateKey || process.env.PRIVATE_KEY;
-    const contractAddress = req.body.contractAddress || process.env.CONTRACT_ADDRESS; // No fallback if not set
+    // SECURITY: Only accept private key from environment variable, never from request body
+    const privateKey = process.env.PRIVATE_KEY;
+    const contractAddress = req.body.contractAddress || process.env.CONTRACT_ADDRESS;
     
     if (!privateKey) {
-        res.status(400).json({ error: 'Missing PRIVATE_KEY in .env or request body' });
+        res.status(400).json({ 
+            error: 'PRIVATE_KEY not configured',
+            message: 'Please set PRIVATE_KEY in your .env file. For security reasons, private keys cannot be passed in API requests.'
+        });
+        return;
+    }
+    
+    // Validate private key format (should be 64 hex characters, optionally prefixed with 0x)
+    const keyPattern = /^(0x)?[0-9a-fA-F]{64}$/;
+    if (!keyPattern.test(privateKey)) {
+        res.status(400).json({ 
+            error: 'Invalid PRIVATE_KEY format',
+            message: 'PRIVATE_KEY must be a 64-character hexadecimal string (optionally prefixed with 0x)'
+        });
         return;
     }
     
@@ -127,7 +140,7 @@ app.post('/start', async (req, res) => {
         
         // Verify wallet connection
         const address = await signer.getAddress();
-        console.log(`✓ Agent wallet connected: ${address}`);
+        logger.info('Agent wallet connected', { address, network: rpcUrl });
         
         await agentService.start(signer, contractAddress);
         res.json({ 
@@ -137,7 +150,7 @@ app.post('/start', async (req, res) => {
             contract: contractAddress || 'none (analysis-only mode)'
         });
     } catch (e: any) {
-        console.error('Error starting agent:', e);
+        logger.error('Error starting agent', { error: e.message });
         res.status(500).json({ error: e.message });
     }
 });

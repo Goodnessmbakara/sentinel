@@ -220,10 +220,12 @@ export class AgentService {
                         const ERC20_ABI = [
                             'function approve(address spender, uint256 amount) external returns (bool)',
                             'function allowance(address owner, address spender) external view returns (uint256)',
-                            'function decimals() view returns (uint8)'
+                            'function decimals() view returns (uint8)',
+                            'function balanceOf(address account) view returns (uint256)'
                         ];
                         const ROUTER_ABI = [
-                            'function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) external returns (uint256[])'
+                            'function swapExactTokensForTokens(uint256,uint256,address[],address,uint256) external returns (uint256[])',
+                            'function getAmountsOut(uint256 amountIn, address[] memory path) view returns (uint256[] memory amounts)'
                         ];
 
                         const tokenIn = tokenAddress;
@@ -234,6 +236,13 @@ export class AgentService {
 
                         const amountIn = EthersNamespace.parseUnits('0.1', decimals);
 
+                        // Check balance before attempting swap
+                        const balance = await tokenContract.balanceOf(await this.signer.getAddress());
+                        if (balance < amountIn) {
+                            logger.warn('Insufficient balance for swap', { balance: balance.toString(), required: amountIn.toString() });
+                            return decision;
+                        }
+
                         const owner = await this.signer.getAddress();
                         const allowance: bigint = await tokenContract.allowance(owner, routerAddress);
                         if (allowance < amountIn) {
@@ -243,11 +252,23 @@ export class AgentService {
 
                         const router = new EthersNamespace.Contract(routerAddress, ROUTER_ABI, this.signer as any);
                         const path = [tokenIn, tokenOut];
+                        
+                        // CRITICAL FIX: Calculate minOut with slippage protection
+                        const slippageTolerance = this.riskProfile.slippageTolerance || 1; // Default 1%
+                        const expectedAmounts = await router.getAmountsOut(amountIn, path);
+                        const expectedOut = expectedAmounts[1];
+                        const minOut = (expectedOut * BigInt(100 - slippageTolerance)) / 100n;
+                        
+                        logger.info('Swap slippage protection', {
+                            expectedOut: expectedOut.toString(),
+                            minOut: minOut.toString(),
+                            slippageTolerance: `${slippageTolerance}%`
+                        });
+                        
                         const deadline = Math.floor(Date.now() / 1000) + 60 * 5;
-                        const minOut = 0;
                         const swapTx = await router.swapExactTokensForTokens(amountIn, minOut, path, owner, deadline);
                         await swapTx.wait?.();
-                        logger.info('Fallback on-chain swap attempted');
+                        logger.info('Fallback on-chain swap successful', { minOut: minOut.toString() });
                     } catch (swapErr) {
                         metrics.inc('errors');
                         logger.error('Fallback swap failed', { swapErr });

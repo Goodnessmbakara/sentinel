@@ -36,6 +36,7 @@ export class ConfigRepository {
             config.minConfidenceScore,
             config.stopLossPercent,
             config.maxPositionSize,
+            config.slippageTolerance || 1,
             Math.floor(Date.now() / 1000)
         );
     }
@@ -56,7 +57,8 @@ export class ConfigRepository {
             allowedTokens: JSON.parse(row.allowed_tokens),
             minConfidenceScore: row.min_confidence_score,
             stopLossPercent: row.stop_loss_percent,
-            maxPositionSize: row.max_position_size
+            maxPositionSize: row.max_position_size,
+            slippageTolerance: row.slippage_tolerance || 1
         };
     }
 
