@@ -27,11 +27,11 @@ export class X402Service {
         if (this.enabled) {
             try {
                 // Lazy load facilitator client only if enabled
-                const { FacilitatorClient } = require('@crypto.com/facilitator-client');
-                this.facilitatorClient = new FacilitatorClient({
+                const { Facilitator } = require('@crypto.com/facilitator-client');
+                this.facilitatorClient = new Facilitator({
                     network: process.env.CHAIN_ID === '338' ? 'cronos-testnet' : 'cronos-mainnet'
                 });
-                logger.info('x402 Service enabled');
+                logger.info('x402 Service enabled with real Facilitator client');
             } catch (error: any) {
                 logger.warn('Failed to initialize x402 facilitator client', { error: error.message });
                 this.enabled = false;
