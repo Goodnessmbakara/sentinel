@@ -88,19 +88,111 @@ export class X402Service {
     }
 
     /**
-     * Execute trade via x402 facilitator
-     * NO FALLBACK - Fails loudly if x402 doesn't work
+     * Execute payment via x402 facilitator
+     * Real implementation using EIP-3009 authorization
      */
-    async executeTrade(instruction: any): Promise<any> {
+    async executeTrade(instruction: any, walletPrivateKey: string): Promise<any> {
         if (!this.isEnabled()) {
-            throw new Error('CRITICAL: x402 is not enabled. Cannot execute trade via payment instruction. Set USE_X402=true or use direct swap path.');
+            throw new Error('CRITICAL: x402 is not enabled. Set USE_X402=true in .env');
         }
 
-        logger.info('Attempting x402 facilitated trade execution');
+        if (!this.facilitatorClient) {
+            throw new Error('CRITICAL: Facilitator client not initialized');
+        }
+
+        try {
+            logger.info('Starting x402 payment execution', {
+                type: instruction.type,
+                service: instruction.payload?.service
+            });
+
+            const ethers = require('ethers');
+            const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+            const signer = new ethers.Wallet(walletPrivateKey, provider);
+
+            // Extract payment details from instruction
+            const { tokenIn, amountIn, recipient } = instruction.payload.parameters;
+
+            logger.info('Generating EIP-3009 payment header', {
+                to: recipient,
+                value: amountIn,
+                from: await signer.getAddress()
+            });
+
+            // 1. Generate payment header (EIP-3009 authorization)
+            const header = await this.facilitatorClient.generatePaymentHeader({
+                to: recipient,
+                value: amountIn,
+                signer: signer,
+            });
+
+            logger.info('Payment header generated', { header });
+
+            // 2. Generate payment requirements
+            const requirements = this.facilitatorClient.generatePaymentRequirements({
+                payTo: recipient,
+                description: `Autonomous trading - ${instruction.type}`,
+                maxAmountRequired: amountIn,
+            });
+
+            logger.info('Payment requirements generated', { requirements });
+
+            // 3. Build verify request
+            const body = this.facilitatorClient.buildVerifyRequest(header, requirements);
+
+            // 4. Verify payment
+            logger.info('Verifying payment...');
+            const verification = await this.facilitatorClient.verifyPayment(body);
+
+            if (!verification.isValid) {
+                throw new Error(`Payment verification failed: ${JSON.stringify(verification)}`);
+            }
+
+            logger.info('Payment verified successfully', { verification });
+
+            // 5. Settle payment
+            logger.info('Settling payment via facilitator...');
+            const settlement = await this.facilitatorClient.settlePayment(body);
+
+            logger.info('Payment settled successfully', {
+                txHash: settlement.txHash,
+                status: settlement.status
+            });
+
+            return {
+                success: true,
+                txHash: settlement.txHash,
+                header: header,
+                verification: verification,
+                settlement: settlement
+            };
+
+        } catch (error: any) {
+            logger.error('x402 payment execution failed', {
+                error: error.message,
+                stack: error.stack
+            });
+            throw new Error(`x402 facilitator execution failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Execute DEX swap (NOTE: This is NOT what x402 was designed for)
+     * x402 is for static payments, not dynamic token swaps
+     * 
+     * This method demonstrates the conceptual mismatch
+     */
+    async executeSwap(instruction: any, walletPrivateKey: string): Promise<any> {
+        logger.warn('executeSwap called: x402 is designed for payments, not DEX swaps');
+        logger.warn('For production, use direct swap execution');
         
-        // TODO: Implement actual facilitator execution
-        // For now this throws to expose that x402 is NOT fully implemented
-        throw new Error('x402 facilitator execution NOT YET IMPLEMENTED. Full implementation requires: 1) EIP-3009 authorization, 2) Facilitator submission, 3) Settlement handling. This error exposes the gap.');
+        // x402 doesn't handle DEX routing - it handles payment settlement
+        // To use x402 for swaps, you'd need a facilitator that:
+        // 1. Receives payment authorization
+        // 2. Executes swap on behalf of user
+        // 3. Returns proceeds
+
+        throw new Error('x402 executeSwap not implemented: Architectural mismatch. x402 is for static payments (API access fees), not dynamic DEX swaps. Use direct swap execution for trading.');
     }
 }
 
